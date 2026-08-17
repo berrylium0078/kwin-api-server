@@ -1,0 +1,37 @@
+[Unit]
+Description=KWin API Server - unix socket + D-Bus service bridging to KWin scripting
+# KWin must be running before the script can be loaded; graphical-session.target
+# is the earliest point where a desktop session is up (the daemon also retries
+# loadScript while KWin is starting).
+After=plasma-kwin_wayland.service
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+
+# RuntimeDirectory=%t/kwin-api-server creates /run/user/<uid>/kwin-api-server
+# (tmpfs) and removes it when the service stops. service.socket and the staged
+# kwinscript.js live in WorkingDirectory, so systemd cleans both up.
+RuntimeDirectory=kwin-api-server
+WorkingDirectory=%t/kwin-api-server
+
+# D-Bus service name, script path and plugin name are configurable.
+# The paths below are filled in by xmake (set_configvar) from the install
+# prefix configured in xmake.lua, e.g. /usr, /usr/local.
+Environment=KWIN_API_SERVICE_NAME=org.example.KwinApiServer
+Environment=KWIN_SCRIPT_PATH=${KAS_SHAREDIR}/kwin-api-server/kwinscript.js
+Environment=KWIN_PLUGIN_NAME=kwin-api-server
+# Optional overrides, e.g. KWIN_WORK_DIR, KWIN_LOAD_RETRIES, KWIN_MAX_CLIENTS
+EnvironmentFile=-/etc/kwin-api-server/env
+
+ExecStart=${KAS_BINDIR}/kwin-api-daemon
+
+# The daemon unloads the script on graceful shutdown; this ExecStopPost is the
+# safety net for SIGKILL/crash: it calls org.kde.kwin.Scripting.unloadScript.
+ExecStopPost=${KAS_LIBEXECDIR}/kwin-api-server/kwinscript-unload.sh
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

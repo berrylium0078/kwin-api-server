@@ -1,0 +1,18 @@
+# Build outputs
+build/
+build.ninja
+.ninja_deps
+.ninja_log
+stage/
+kwinscript/dist/
+kwinscript/node_modules/
+kwinscript/pnpm-workspace.yaml
+.pnpm-store/
+.npm-cache/
+.xmake-global/
+.xmake/
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
