@@ -22,10 +22,12 @@ global shortcuts, …).
 ```
 
 **Status**: the unix socket / D-Bus / KWin-scripting bridge is in place. The
-JSONRPC layer on the socket is still being specified — see
-[doc/PROTOCOL.md](doc/PROTOCOL.md) (transport) and [doc/RPC.md](doc/RPC.md)
-(methods); until then the socket speaks a small line protocol (see [Talking to
-the service](#talking-to-the-service)).
+transport protocol is frozen (phase 0) — see [doc/PROTOCOL.md](doc/PROTOCOL.md)
+for the length-prefixed JSON framing, the per-client buffers and the daemon ↔
+script `poll()`/`push()` interface. The JSONRPC method layer on top of it is
+still being specified ([doc/RPC.md](doc/RPC.md)). Until the framed protocol is
+implemented, the socket speaks a small line protocol (see [Talking to the
+service](#talking-to-the-service)).
 
 ## Requirements
 
@@ -141,8 +143,8 @@ $XDG_RUNTIME_DIR/kwin-api-server/service.socket
 socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kwin-api-server/service.socket"
 ```
 
-Until the JSONRPC layer lands ([doc/PROTOCOL.md](doc/PROTOCOL.md),
-[doc/RPC.md](doc/RPC.md)), the socket speaks a small line protocol:
+Until the length-prefixed JSON framing of [doc/PROTOCOL.md](doc/PROTOCOL.md)
+is implemented, the socket speaks a small line protocol:
 
 ```
 ping    -> pong
@@ -157,5 +159,8 @@ quit    -> server closes the connection
   D-Bus interface, how the KWin script is started, and how to test the
   project (unit tests, integration test, `run.sh` manual run, `run.py`).
 * [doc/PROTOCOL.md](doc/PROTOCOL.md) — communication protocol: client ↔
-  daemon (unix socket) and daemon ↔ script (D-Bus). **TBD, placeholder.**
+  daemon framing (length-prefixed UTF-8 JSON, 1 MB message limit, 16 MB
+  per-direction buffers) and daemon ↔ script D-Bus interface
+  (`poll` / `push`). **Transport layer frozen (phase 0); implementation
+  pending.**
 * [doc/RPC.md](doc/RPC.md) — supported JSONRPC methods. **TBD, placeholder.**

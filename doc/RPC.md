@@ -1,14 +1,18 @@
 # JSONRPC Methods
 
-> **Status: TBD — placeholder.** This document is not finalized. The JSONRPC
-> layer on the unix socket is planned but not implemented; until it lands the
-> socket speaks the interim line protocol described in
-> [PROTOCOL.md](PROTOCOL.md).
+> **Status: TBD — placeholder.** This document is not finalized. The
+> *transport* layer (framing, buffers, the daemon ↔ script `poll()`/`push()`
+> interface) is frozen in [PROTOCOL.md](PROTOCOL.md), but the *application*
+> layer — what the JSON payloads mean — is still TBD. Until the framed
+> protocol is implemented, the socket speaks the interim line protocol
+> described in [PROTOCOL.md](PROTOCOL.md) §5.
 
 ## Transport
 
-See [PROTOCOL.md](PROTOCOL.md) §1: JSONRPC 2.0 over the unix socket at
-`$XDG_RUNTIME_DIR/kwin-api-server/service.socket` (TBD).
+See [PROTOCOL.md](PROTOCOL.md) §2: JSONRPC 2.0 messages are carried as
+length-prefixed UTF-8 JSON frames over the unix socket at
+`$XDG_RUNTIME_DIR/kwin-api-server/service.socket` (frozen, not yet
+implemented).
 
 ## Planned methods (not implemented yet)
 

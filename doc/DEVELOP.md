@@ -53,7 +53,8 @@ test/
   integration.sh           automated end-to-end test (private bus + mock)
 doc/
   DEVELOP.md               this document
-  PROTOCOL.md              communication protocol (TBD, placeholder)
+  PROTOCOL.md              communication protocol — transport layer frozen
+                           (phase 0); implementation pending
   RPC.md                   JSONRPC methods (TBD, placeholder)
 build/                     xmake build directory (and build.ninja)
 ```
@@ -83,6 +84,20 @@ default `org.example.KwinApiServer`):
   `log()` writes `msg` to the daemon's journal output with a `[script]` source
   tag, mapping `level` to the daemon's own log levels
   (`debug` / `info` / `warn` / `error`; anything else is logged as `info`).
+
+The frozen transport protocol ([PROTOCOL.md](PROTOCOL.md) §3) extends this
+script-facing interface (planned, not yet implemented):
+
+* `/daemon` gains `poll(timeout: i) -> s` — daemon → script control messages
+  (e.g. client connect/disconnect notifications), returned as a
+  JSON-serialized array string;
+* one object per connected client at `/cli${id}` with the fixed interface
+  `org.example.KwinApiClient`, exposing:
+  * `poll(timeout: i) -> s` — that client's inbound messages (client →
+    script direction);
+  * `push(msg: s) -> s` — queue one message for that client's socket (script
+    → client direction), returning `""` on success or an error string when
+    the message exceeds 1 MB or the client's 16 MB write buffer is full.
 
 `Introspect` is provided automatically by sd-bus.
 
