@@ -1,15 +1,14 @@
 # kwin-api-server
 
-A Linux desktop background service (systemd user unit) that ties together a
-**unix socket**, a **session-bus D-Bus service** and **KWin scripting**, all
-driven from a single event loop. The event loop is libsystemd's `sd-event`;
-D-Bus goes through `sd-bus`, so socket I/O and D-Bus I/O are multiplexed
-concurrently on one thread.
+A systemd user service that acts as a **proxy between clients and KWin's
+scripting API**: it exposes KWin scripting to clients as JSONRPC over a unix
+socket, so external programs can drive KWin (windows, virtual desktops,
+global shortcuts, …).
 
 ```
                     ┌─────────────────────────────── kwin-api-daemon ───────────────┐
  clients ────────►  │  unix socket (service.socket)      sd-event loop               │
- ("ping"/"status")  │     │  (sd_event_add_io per client, concurrent read/write)     │
+ (JSONRPC, TBD)     │     │  (sd_event_add_io per client, concurrent read/write)     │
                     │     ▼                                                          │
  other D-Bus apps   │  sd-bus: session bus (KWIN_API_SERVICE_NAME)                   │
  ────────────────►  │     │  (sd_bus_attach_event → same loop)                       │
@@ -18,59 +17,15 @@ concurrently on one thread.
                     └────────────────────────────────────────────────────────────────┘
                                       │ loads
                                       ▼
-                              kwinscript.js (esbuild bundle
-                              of kwinscript/src/*.ts, loaded by KWin)
+                              kwinscript.js (esbuild bundle of
+                              kwinscript/src/*.ts, loaded by KWin)
 ```
 
-## What the daemon does
-
-1. **Binds `service.socket`** in its working directory. Under systemd the unit
-   sets `RuntimeDirectory=kwin-api-server` and `WorkingDirectory=%t/kwin-api-server`,
-   so both the socket file and the staged script live in a runtime directory
-   that **systemd removes when the service stops**.
-2. **Registers a D-Bus service name** on the session bus (`KWIN_API_SERVICE_NAME`).
-   D-Bus releases the name when the connection closes, and the session bus is
-   cleaned up at logout.
-3. **Loads and runs the KWin script**: copies the bundled script
-   (`KWIN_SCRIPT_PATH`, default `/usr/share/kwin-api-server/kwinscript.js`) to
-   `kwinscript.js` in the working directory (a file systemd cleans up), then
-   calls `org.kde.kwin.Scripting.loadScript(filePath, pluginName)` with
-   `pluginName` from `KWIN_PLUGIN_NAME`. The returned id (`-1` = failure) is
-   used to call `/Scripting/Script<id> org.kde.kwin.Script.run()`.
-   On shutdown the daemon sends `org.kde.kwin.Scripting.unloadScript(pluginName)`;
-   the unit's `ExecStopPost=` runs `kwinscript-unload.sh` as a safety net for
-   SIGKILL/crash.
-
-## Project layout
-
-```
-xmake.lua                  build configuration (C++20, xmake + Ninja)
-daemon/
-  src/                     C++ sources
-    main.cpp               entry point + orchestration
-    config.{hpp,cpp}       env-var configuration (pure, unit-tested)
-    log.{hpp,cpp}          leveled stderr logging (→ journal under systemd)
-    file_util.{hpp,cpp}    script staging helpers
-    socket_server.{hpp,cpp} sd-event driven unix socket server
-    dbus_service.{hpp,cpp} sd-bus session-bus service (name + own interface)
-    kwin_client.{hpp,cpp}  KWin scripting D-Bus client
-  systemd/
-    kwin-api-server.service.in user unit template; xmake fills in the install
-                              paths and installs the generated file
-                              (→ <prefix>/lib/systemd/user)
-    kwinscript-unload.sh      ExecStopPost safety net (→ <prefix>/libexec)
-kwinscript/
-  src/                     TypeScript sources (index.ts; types come from kwin-ts)
-  kwin-ts/                 KWin scripting API TS declarations (ambient package,
-                           wired into the typecheck via tsconfig.json typeRoots)
-  package.json / tsconfig.json / esbuild.build.mjs
-  dist/kwinscript.js       generated bundle (esbuild, single file)
-test/
-  unit/                    C++ unit tests (`xmake test`)
-  mock_kwin.cpp            mock org.kde.KWin (sd-bus) for integration tests
-  integration.sh           end-to-end test (socket + D-Bus + KWin lifecycle)
-build/                     xmake build directory (and build.ninja)
-```
+**Status**: the unix socket / D-Bus / KWin-scripting bridge is in place. The
+JSONRPC layer on the socket is still being specified — see
+[doc/PROTOCOL.md](doc/PROTOCOL.md) (transport) and [doc/RPC.md](doc/RPC.md)
+(methods); until then the socket speaks a small line protocol (see [Talking to
+the service](#talking-to-the-service)).
 
 ## Requirements
 
@@ -88,67 +43,36 @@ build/                     xmake build directory (and build.ninja)
 ```sh
 # xmake flow (default): configures with Ninja as the underlying build engine
 xmake f -m release
-xmake                        # builds kwinscript bundle (pnpm+esbuild) and all C++ targets
+xmake                        # builds the kwinscript bundle (tsc + esbuild) and all C++ targets
 xmake test                   # unit tests
-
-# pure Ninja flow (build.ninja generated by xmake)
-xmake f -m release
-xmake project -k ninja       # -> build.ninja
-ninja                        # builds the C++ targets
 ```
 
-`xmake` builds the kwinscript bundle first (the daemon target depends on it);
-the bundle can also be built standalone with `pnpm --dir kwinscript build`
-(which runs `tsc --noEmit` first, then esbuild) and type-checked alone with
-`pnpm --dir kwinscript typecheck`. esbuild targets **ES2016**: KWin evaluates
-scripts in QJSEngine, which supports ES6 (Promise, generators, …) but not the
-ES2017 `async`/`await` keywords (KDE bug 478617 / QTBUG-58620), so esbuild
-lowers those while keeping the rest native.
-
-`xmake` only re-bundles when a **non-git-ignored** input under `kwinscript/`
-changed (`src/`, `kwin-ts/`, `tsconfig.json`, `package.json`, `pnpm-lock.yaml`,
-`esbuild.build.mjs`); touching the git-ignored `dist/`, `node_modules/` or the
-generated `pnpm-workspace.yaml` does not trigger a rebuild.
-
-The first `xmake` run runs `pnpm install` for the subproject; the pnpm store
-and cache are kept inside the repository (`.pnpm-store/`, `.npm-cache/`) so
-the build works even when `$HOME` is not writable (CI/sandbox).
-
-## Test
+`xmake` builds the kwinscript bundle first (the daemon target depends on it).
+The bundle can also be built and type-checked standalone:
 
 ```sh
-xmake test                   # C++ unit tests (config, file util, socket server)
-test/integration.sh          # end-to-end test with a private session bus and
-                             # a mock org.kde.KWin; verifies socket protocol,
-                             # D-Bus name, loadScript/run, SIGTERM -> unloadScript
+pnpm --dir kwinscript typecheck     # tsc --noEmit against the kwin-ts declarations
+pnpm --dir kwinscript build         # tsc --noEmit, then esbuild -> dist/kwinscript.js
 ```
 
-The integration test needs `dbus-daemon` and `socat` and does **not** need a
-real KWin session.
+esbuild targets **ES2016**: KWin evaluates scripts in QJSEngine, which
+supports ES6 (Promise, generators, …) but not the ES2017 `async`/`await`
+keywords (KDE bug 478617 / QTBUG-58620), so esbuild lowers those while keeping
+the rest native. `xmake` only re-bundles when a non-git-ignored input under
+`kwinscript/` changed (see [doc/DEVELOP.md](doc/DEVELOP.md) → Script
+startup).
 
 ## Install
 
 ```sh
 sudo xmake install           # installs to $KAS_INSTALLDIR (default /usr)
-xmake install -o <dir>       # install to a different prefix
-xmake install --installdir=<dir>   # same, or via $DESTDIR
+xmake install -o <dir>       # staged install to a different prefix, e.g. ./stage
 ```
 
-The default prefix is the single `KAS_INSTALLDIR` variable at the top of
-`xmake.lua`. The systemd unit is **generated at install time** from
-`daemon/systemd/kwin-api-server.service.in`, and the paths inside it
+The systemd user unit is **generated at install time** from
+`daemon/systemd/kwin-api-server.service.in`; the paths inside it
 (`ExecStart=`, `ExecStopPost=`, `KWIN_SCRIPT_PATH=`) always follow the
-*effective* install prefix — the `KAS_INSTALLDIR` default, or the
-`-o <dir>` / `--installdir` / `$DESTDIR` override for that invocation.
-A relative prefix is resolved against the project directory (xmake does the
-same for the install itself) and baked in as an absolute path:
-
-```sh
-xmake install -o /usr/local     # unit: ExecStart=/usr/local/bin/kwin-api-daemon
-xmake install -o stage          # unit: ExecStart=<projectdir>/stage/bin/kwin-api-daemon
-```
-
-Installed files (with the default `/usr` prefix):
+*effective* install prefix. Installed files (default `/usr` prefix):
 
 | path | content |
 |---|---|
@@ -157,80 +81,68 @@ Installed files (with the default `/usr` prefix):
 | `$KAS_INSTALLDIR/lib/systemd/user/kwin-api-server.service` | systemd user unit (generated) |
 | `$KAS_INSTALLDIR/libexec/kwin-api-server/kwinscript-unload.sh` | ExecStopPost unload helper |
 
-## Running it as a systemd user service
+### Quick dev loop with run.py
+
+`run.py` manages the systemd unit for you: stop → (optionally rebuild and
+staged-install to `./stage`, then `systemctl link` + `daemon-reload`) → start →
+follow the logs; on exit it stops the service again.
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now kwin-api-server.service
-systemctl --user status kwin-api-server.service
-journalctl --user -u kwin-api-server.service -f
+./run.py            # stop, start, follow logs (Ctrl+C stops again)
+./run.py --build    # also: xmake build + staged install + (re)link the unit
 ```
 
-The unit (generated from `daemon/systemd/kwin-api-server.service.in`, installed
-to `<prefix>/lib/systemd/user`) is a user service tied to
-`graphical-session.target` (KWin is up before the script is loaded; the daemon
-additionally retries `loadScript` while KWin is starting). `RuntimeDirectory`
-gives the daemon a fresh, systemd-managed working directory, so
-`service.socket` and `kwinscript.js` are cleaned up automatically.
-
-## Configuration (environment variables)
+## Configuration
 
 | variable | default | description |
 |---|---|---|
 | `KWIN_API_SERVICE_NAME` | `org.example.KwinApiServer` | D-Bus name to register on the session bus |
 | `KWIN_SCRIPT_PATH` | – (required) | path of the bundled `kwinscript.js` |
 | `KWIN_PLUGIN_NAME` | – (required) | `pluginName` for KWin scripting |
-| `KWIN_WORK_DIR` | current directory | where `service.socket` + `kwinscript.js` live |
+| `KWIN_WORK_DIR` | current directory | where `service.socket` + the staged `kwinscript.js` live |
 | `KWIN_LOAD_RETRIES` | `30` | `loadScript` retries while KWin is unreachable |
 | `KWIN_LOAD_RETRY_DELAY_MS` | `1000` | delay between retries |
 | `KWIN_MAX_CLIENTS` | `64` | max concurrent unix-socket clients |
 | `KWIN_DEBUG` | – | `1` enables verbose logging |
 
 Admin overrides can be dropped in `/etc/kwin-api-server/env`
-(`EnvironmentFile=-` in the unit).
+(`EnvironmentFile=-` in the unit). CLI: `--help`, `--version`, `--check`
+(verify socket + D-Bus name without touching KWin).
 
-CLI: `--help`, `--version`, `--check` (verify socket + D-Bus name without
-touching KWin).
+## Running as a systemd user service
 
-## The daemon's own D-Bus interface
+```sh
+# after a real install (or: link the staged unit — run.py --build does this)
+systemctl --user daemon-reload
+systemctl --user enable --now kwin-api-server.service
+systemctl --user status kwin-api-server.service
+journalctl --user -u kwin-api-server.service -f
+```
 
-The daemon serves two objects on its session-bus name
-(`KWIN_API_SERVICE_NAME`):
+The unit is tied to `graphical-session.target` (KWin is up before the script
+is loaded; the daemon additionally retries `loadScript` while KWin is
+starting). `RuntimeDirectory=kwin-api-server` gives the daemon a fresh,
+systemd-managed working directory, so `service.socket` and the staged
+`kwinscript.js` are cleaned up automatically.
 
-* the object path derived from its name (`org.example.KwinApiServer` →
-  `/org/example/KwinApiServer`):
+## Talking to the service
 
-  ```
-  org.example.KwinApiServer.Status() -> s
-  ```
+The socket lives in the daemon's working directory. Under systemd that is the
+runtime directory:
 
-* the fixed path `/daemon`, used by the loaded KWin script (the interface name
-  is the same dotted string as the service name):
+```
+$XDG_RUNTIME_DIR/kwin-api-server/service.socket
+# e.g. /run/user/1000/kwin-api-server/service.socket
+```
 
-  ```
-  <service name>.log(level: s, msg: s) -> ()
-  ```
+(When run manually, it is `<KWIN_WORK_DIR>/service.socket`.)
 
-  `log()` writes `msg` to the daemon's journal output with a `[script]` source
-  tag, using the level (`debug` / `info` / `warn` / `error`; anything else is
-  logged as `info`).
+```sh
+socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kwin-api-server/service.socket"
+```
 
-`Introspect` is provided automatically by sd-bus.
-
-### How the script finds the daemon
-
-The KWin script never hardcodes the daemon's D-Bus service name. It ships with
-the placeholder constant `@DAEMON_DBUS_SERVICE@` (see `kwinscript/src/index.ts`);
-while staging the bundle as `kwinscript.js` in the working directory, the daemon
-rewrites every occurrence to its runtime service name
-(`KWIN_API_SERVICE_NAME`). The script then calls
-`<name> log("<level>", "<message>")` on `/daemon` through a Promise wrapper
-around KWin's callback-based `callDBus()`, guarded by a single-shot `QTimer`
-that rejects the call if no reply arrives within 5 s.
-
-## Unix socket protocol
-
-Line based; useful for probing liveness:
+Until the JSONRPC layer lands ([doc/PROTOCOL.md](doc/PROTOCOL.md),
+[doc/RPC.md](doc/RPC.md)), the socket speaks a small line protocol:
 
 ```
 ping    -> pong
@@ -239,13 +151,11 @@ quit    -> server closes the connection
 <other> -> echo <other>
 ```
 
-## Notes / troubleshooting
+## Documentation
 
-* The session bus address: `sd_bus_open_user` honors `DBUS_SESSION_BUS_ADDRESS`
-  and falls back to `$XDG_RUNTIME_DIR/bus`, so the unit does not need to set
-  it.
-* `sd_bus_set_close_on_exit(bus, 0)` keeps the connection usable after the
-  event loop stops, which the shutdown-time `unloadScript` relies on.
-* If the script does not show up in KWin, run
-  `qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript` against a
-  file to test KWin's scripting API directly.
+* [doc/DEVELOP.md](doc/DEVELOP.md) — development guide: project structure,
+  D-Bus interface, how the KWin script is started, and how to test the
+  project (unit tests, integration test, `run.sh` manual run, `run.py`).
+* [doc/PROTOCOL.md](doc/PROTOCOL.md) — communication protocol: client ↔
+  daemon (unix socket) and daemon ↔ script (D-Bus). **TBD, placeholder.**
+* [doc/RPC.md](doc/RPC.md) — supported JSONRPC methods. **TBD, placeholder.**
