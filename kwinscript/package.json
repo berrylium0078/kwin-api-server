@@ -9,7 +9,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "node esbuild.build.mjs",
+    "build": "tsc --noEmit && node esbuild.build.mjs",
     "build:watch": "node esbuild.build.mjs --watch",
     "typecheck": "tsc --noEmit"
   },

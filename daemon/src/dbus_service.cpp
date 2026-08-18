@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "dbus_service.hpp"
 
+#include <cerrno>
 #include <cstring>
+#include <string>
 
 #include "config.hpp"
 #include "log.hpp"
@@ -12,12 +14,25 @@ namespace {
 
 constexpr uint64_t kMethodCallTimeoutUsec = 30ULL * 1000 * 1000; // 30 s
 
+// Object path on which the daemon's own script-facing interface is served.
+// kwinscript (kwinscript/src/index.ts) calls log(level, msg) here.
+constexpr const char* kDaemonObjectPath = "/daemon";
+
 // Interface served on the daemon's own object path. The interface name is the
 // same dotted string as the service name, so both are configurable through
-// KWIN_API_SERVICE_NAME.
+// KWIN_API_SERVICE_NAME (the KWin script derives its interface argument from
+// the same name — see the @DAEMON_DBUS_SERVICE@ placeholder handling).
 const sd_bus_vtable kStatusVtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("Status", "", "s", DbusService::method_status, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_VTABLE_END,
+};
+
+// Script-facing interface at /daemon: log(level: s, msg: s) — write a
+// journal line with a "[script]" source tag.
+const sd_bus_vtable kDaemonVtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_METHOD("log", "ss", "", DbusService::method_log, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_VTABLE_END,
 };
 
@@ -84,6 +99,16 @@ int DbusService::attach(sd_event* event) {
         log_error("sd_bus_add_object_vtable: " + std::string(std::strerror(-r)));
         return r;
     }
+    // The object the loaded KWin script talks to (log method). The interface
+    // name is the same dotted string as the service name — the script derives
+    // it from the substituted @DAEMON_DBUS_SERVICE@ placeholder.
+    r = sd_bus_add_object_vtable(bus_, nullptr, kDaemonObjectPath,
+                                 service_name_.c_str(), kDaemonVtable, this);
+    if (r < 0) {
+        log_error("sd_bus_add_object_vtable(" + std::string(kDaemonObjectPath) +
+                  "): " + std::string(std::strerror(-r)));
+        return r;
+    }
     return 0;
 }
 
@@ -109,6 +134,33 @@ void DbusService::close() {
 int DbusService::method_status(sd_bus_message* message, void* userdata, sd_bus_error* /*error*/) {
     auto* self = static_cast<DbusService*>(userdata);
     return sd_bus_reply_method_return(message, "s", self->status_.c_str());
+}
+
+int DbusService::method_log(sd_bus_message* message, void* userdata, sd_bus_error* /*error*/) {
+    auto* self = static_cast<DbusService*>(userdata);
+    (void)self; // log_* are free functions
+    const char* level = nullptr;
+    const char* msg = nullptr;
+    int r = sd_bus_message_read(message, "ss", &level, &msg);
+    if (r < 0) {
+        return r;
+    }
+    if (!level || !msg) {
+        return -EINVAL;
+    }
+    // Tag the line so journal entries coming from the KWin script can be told
+    // apart from the daemon's own messages.
+    const std::string text = "[script] " + std::string(msg);
+    if (std::strcmp(level, "debug") == 0) {
+        log_debug(text);
+    } else if (std::strcmp(level, "warn") == 0) {
+        log_warn(text);
+    } else if (std::strcmp(level, "error") == 0) {
+        log_error(text);
+    } else {
+        log_info(text); // "info" and anything unrecognized
+    }
+    return sd_bus_reply_method_return(message, "");
 }
 
 int DbusService::on_name_lost(sd_bus_message* message, void* userdata, sd_bus_error* /*error*/) {

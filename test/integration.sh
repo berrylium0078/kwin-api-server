@@ -92,7 +92,9 @@ grep -q "check ok" "$LOG/daemon-check.log" || fail "--check did not report ok"
 
 # ---------------------------------------------------------------------------
 echo "==> fake kwinscript bundle + daemon run"
-printf 'print("[mock] kwinscript loaded");\n' > "$WORK/kwinscript.js"
+# The bundle carries the @DAEMON_DBUS_SERVICE@ placeholder; the daemon must
+# rewrite it to its runtime service name while staging kwinscript.js.
+printf 'print("[mock] kwinscript loaded service=@DAEMON_DBUS_SERVICE@");\n' > "$WORK/kwinscript.js"
 
 # `exec` is important: $! must be the daemon's PID, not the subshell's.
 (
@@ -117,6 +119,11 @@ grep -q "CALL loadScript" "$LOG/mock.log" || fail "daemon never called loadScrip
 [ -f "$WORK/kwinscript.js" ] || fail "staged kwinscript.js missing"
 [ -S "$WORK/service.socket" ] || fail "service.socket missing"
 
+# the daemon must have substituted the @DAEMON_DBUS_SERVICE@ placeholder with
+# its runtime service name in the staged copy
+grep -q "service=org.example.KwinApiTest" "$WORK/kwinscript.js" \
+    || fail "placeholder @DAEMON_DBUS_SERVICE@ not substituted in staged script"
+
 # the mock must have seen the absolute path of the staged file + plugin name
 grep -q "CALL loadScript .*/kwinscript.js kwin-api-server-test" "$LOG/mock.log" \
     || fail "loadScript args wrong (see mock.log)"
@@ -127,6 +134,19 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 grep -q "CALL run" "$LOG/mock.log" || fail "daemon never called Script.run"
+
+# ---------------------------------------------------------------------------
+echo "==> daemon log() D-Bus method (script-facing /daemon object)"
+dbus-send --session --print-reply \
+    --dest=org.example.KwinApiTest /daemon \
+    org.example.KwinApiTest.log string:info string:hello-from-integration-test \
+    > /dev/null 2>&1 || fail "dbus-send call to daemon log() failed"
+for _ in $(seq 1 100); do
+    grep -q "\[script\] hello-from-integration-test" "$LOG/daemon.log" 2>/dev/null && break
+    sleep 0.05
+done
+grep -q "\[script\] hello-from-integration-test" "$LOG/daemon.log" \
+    || fail "daemon did not log the script message"
 
 # ---------------------------------------------------------------------------
 echo "==> unix socket line protocol (two concurrent clients)"

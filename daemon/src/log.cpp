@@ -2,23 +2,18 @@
 #include "log.hpp"
 
 #include <cstdio>
-#include <ctime>
-#include <unistd.h>
 
 namespace kas {
 
 namespace {
 bool g_debug = false;
 
+// Deliberately no timestamp / process name in the line: when the daemon runs
+// under systemd, the journal already prefixes every line with those
+// (e.g. `systemctl status` shows them), so repeating them here would be
+// redundant noise.
 void emit(const char* level, const char* color, const std::string& message) {
-    char ts[32] = {0};
-    std::time_t now = std::time(nullptr);
-    std::tm tm_buf{};
-    if (::localtime_r(&now, &tm_buf)) {
-        std::strftime(ts, sizeof(ts), "%H:%M:%S", &tm_buf);
-    }
-    std::fprintf(stderr, "\033[%sm%s kwin-api-server[%d] %s\033[0m %s\n",
-                 color, ts, static_cast<int>(::getpid()), level, message.c_str());
+    std::fprintf(stderr, "\033[%sm%s\033[0m %s\n", color, level, message.c_str());
     std::fflush(stderr);
 }
 } // namespace

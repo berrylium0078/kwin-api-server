@@ -72,7 +72,7 @@ TEST(stage_kwinscript_copies_into_workdir) {
     auto src = dir / "bundle.js";
     write_file(src, "print('bundled');\n");
 
-    std::string err = kas::stage_kwinscript(src, dir);
+    std::string err = kas::stage_kwinscript(src, dir, "org.example.KwinApiServer");
     CHECK(err.empty());
     CHECK(std::filesystem::exists(dir / "kwinscript.js"));
     CHECK_EQ(std::filesystem::file_size(dir / "kwinscript.js"),
@@ -81,15 +81,44 @@ TEST(stage_kwinscript_copies_into_workdir) {
     std::filesystem::remove_all(dir);
 }
 
-TEST(stage_kwinscript_same_path_is_noop) {
+TEST(stage_kwinscript_substitutes_service_name) {
     auto dir = make_temp_dir();
-    auto script = dir / "kwinscript.js";
-    write_file(script, "print('x');\n");
+    auto src = dir / "bundle.js";
+    write_file(src, "const DAEMON_DBUS_SERVICE = \"@DAEMON_DBUS_SERVICE@\";\n"
+                    "print('loaded');\n");
 
-    // src == dst (KWIN_SCRIPT_PATH points at the working copy): must succeed
-    // without trying to copy a file onto itself.
-    std::string err = kas::stage_kwinscript(script, dir);
+    std::string err = kas::stage_kwinscript(src, dir, "org.example.KwinApiTest");
     CHECK(err.empty());
 
+    std::ifstream in(dir / "kwinscript.js");
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK_EQ(content,
+             "const DAEMON_DBUS_SERVICE = \"org.example.KwinApiTest\";\n"
+             "print('loaded');\n");
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(stage_kwinscript_same_path_is_rewritten_in_place) {
+    auto dir = make_temp_dir();
+    auto script = dir / "kwinscript.js";
+    write_file(script, "print('x @DAEMON_DBUS_SERVICE@');\n");
+
+    // src == dst (KWIN_SCRIPT_PATH points at the working copy): must succeed
+    // and still apply the placeholder substitution.
+    std::string err = kas::stage_kwinscript(script, dir, "org.example.KwinApiTest");
+    CHECK(err.empty());
+
+    std::ifstream in(script);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK_EQ(content, "print('x org.example.KwinApiTest');\n");
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(stage_kwinscript_missing_source) {
+    auto dir = make_temp_dir();
+    std::string err = kas::stage_kwinscript(dir / "nope.js", dir, "org.example.KwinApiTest");
+    CHECK(!err.empty());
     std::filesystem::remove_all(dir);
 }

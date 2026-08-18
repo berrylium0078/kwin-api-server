@@ -7,7 +7,10 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": [],
+    // Load the KWin scripting API declarations from the local kwin-ts package
+    // (kwin-ts/index.d.ts, discovered via its package.json "types" field).
+    "typeRoots": ["."],
+    "types": ["kwin-ts"],
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"]

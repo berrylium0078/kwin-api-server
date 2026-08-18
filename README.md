@@ -60,7 +60,9 @@ daemon/
                               (→ <prefix>/lib/systemd/user)
     kwinscript-unload.sh      ExecStopPost safety net (→ <prefix>/libexec)
 kwinscript/
-  src/                     TypeScript sources (index.ts + kwin.d.ts ambient types)
+  src/                     TypeScript sources (index.ts; types come from kwin-ts)
+  kwin-ts/                 KWin scripting API TS declarations (ambient package,
+                           wired into the typecheck via tsconfig.json typeRoots)
   package.json / tsconfig.json / esbuild.build.mjs
   dist/kwinscript.js       generated bundle (esbuild, single file)
 test/
@@ -97,7 +99,16 @@ ninja                        # builds the C++ targets
 
 `xmake` builds the kwinscript bundle first (the daemon target depends on it);
 the bundle can also be built standalone with `pnpm --dir kwinscript build`
-(esbuild) and type-checked with `pnpm --dir kwinscript typecheck`.
+(which runs `tsc --noEmit` first, then esbuild) and type-checked alone with
+`pnpm --dir kwinscript typecheck`. esbuild targets **ES2016**: KWin evaluates
+scripts in QJSEngine, which supports ES6 (Promise, generators, …) but not the
+ES2017 `async`/`await` keywords (KDE bug 478617 / QTBUG-58620), so esbuild
+lowers those while keeping the rest native.
+
+`xmake` only re-bundles when a **non-git-ignored** input under `kwinscript/`
+changed (`src/`, `kwin-ts/`, `tsconfig.json`, `package.json`, `pnpm-lock.yaml`,
+`esbuild.build.mjs`); touching the git-ignored `dist/`, `node_modules/` or the
+generated `pnpm-workspace.yaml` does not trigger a rebuild.
 
 The first `xmake` run runs `pnpm install` for the subproject; the pnpm store
 and cache are kept inside the repository (`.pnpm-store/`, `.npm-cache/`) so
@@ -183,14 +194,39 @@ touching KWin).
 
 ## The daemon's own D-Bus interface
 
-The daemon serves one method on the object path derived from its name
-(`org.example.KwinApiServer` → `/org/example/KwinApiServer`):
+The daemon serves two objects on its session-bus name
+(`KWIN_API_SERVICE_NAME`):
 
-```
-org.example.KwinApiServer.Status() -> s
-```
+* the object path derived from its name (`org.example.KwinApiServer` →
+  `/org/example/KwinApiServer`):
+
+  ```
+  org.example.KwinApiServer.Status() -> s
+  ```
+
+* the fixed path `/daemon`, used by the loaded KWin script (the interface name
+  is the same dotted string as the service name):
+
+  ```
+  <service name>.log(level: s, msg: s) -> ()
+  ```
+
+  `log()` writes `msg` to the daemon's journal output with a `[script]` source
+  tag, using the level (`debug` / `info` / `warn` / `error`; anything else is
+  logged as `info`).
 
 `Introspect` is provided automatically by sd-bus.
+
+### How the script finds the daemon
+
+The KWin script never hardcodes the daemon's D-Bus service name. It ships with
+the placeholder constant `@DAEMON_DBUS_SERVICE@` (see `kwinscript/src/index.ts`);
+while staging the bundle as `kwinscript.js` in the working directory, the daemon
+rewrites every occurrence to its runtime service name
+(`KWIN_API_SERVICE_NAME`). The script then calls
+`<name> log("<level>", "<message>")` on `/daemon` through a Promise wrapper
+around KWin's callback-based `callDBus()`, guarded by a single-shot `QTimer`
+that rejects the call if no reply arrives within 5 s.
 
 ## Unix socket protocol
 

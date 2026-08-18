@@ -14,10 +14,15 @@ std::string copy_file_overwrite(const std::filesystem::path& src,
 
 // Stage the configured KWin script as <work_dir>/kwinscript.js — the copy the
 // daemon hands to org.kde.kwin.Scripting.loadScript and that systemd removes
-// together with the working directory when the service stops. If src already
-// equals the destination (e.g. the unit points KWIN_SCRIPT_PATH directly at
-// the working copy) this is a no-op. Returns an empty string on success.
+// together with the working directory when the service stops. Before writing,
+// the @DAEMON_DBUS_SERVICE@ placeholder inside the bundle (see
+// kwinscript/src/index.ts) is rewritten to the daemon's runtime D-Bus service
+// name, so the script never hardcodes it. src may equal the destination
+// (e.g. the unit points KWIN_SCRIPT_PATH directly at the working copy); the
+// file is read first and then rewritten in place. Returns an empty string on
+// success, otherwise a human-readable error message.
 std::string stage_kwinscript(const std::filesystem::path& script_path,
-                             const std::filesystem::path& work_dir);
+                             const std::filesystem::path& work_dir,
+                             const std::string& service_name);
 
 } // namespace kas

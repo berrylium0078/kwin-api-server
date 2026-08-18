@@ -205,7 +205,8 @@ int main(int argc, char** argv) {
         sd_event_unref(event);
         return 1;
     }
-    std::string stage_error = kas::stage_kwinscript(config.script_path, config.work_dir);
+    std::string stage_error =
+        kas::stage_kwinscript(config.script_path, config.work_dir, config.service_name);
     if (!stage_error.empty()) {
         kas::log_error("cannot stage kwinscript.js: " + stage_error);
         dbus.close();
@@ -214,7 +215,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::filesystem::path staged = std::filesystem::absolute(config.work_dir / "kwinscript.js");
-    kas::log_info("kwinscript staged at " + staged.string());
+    kas::log_info("kwinscript staged at " + staged.string() +
+                  " (daemon D-Bus service: " + config.service_name + ")");
 
     // 4) load & run the script in KWin (retry while KWin is still starting)
     kas::KwinClient kwin(dbus.bus());

@@ -65,8 +65,41 @@ target("kwinscript")
             print("kwinscript: installing dependencies with pnpm ...")
             os.exec("pnpm --dir %s install", kwindir)
         end
-        print("kwinscript: bundling with esbuild ...")
-        os.exec("pnpm --dir %s build", kwindir)
+        -- Rebuild the bundle only when a *non-git-ignored* input changed (see
+        -- .gitignore: dist/, node_modules/ and the generated pnpm-workspace.yaml
+        -- are ignored and never trigger a rebuild). Inputs are the sources
+        -- (src/**), the kwin-ts declarations and the build config files.
+        local bundle = path.join(kwindir, "dist", "kwinscript.js")
+        local bundle_mtime = os.mtime(bundle) -- 0 when the bundle is missing
+        local need_rebuild = bundle_mtime == 0
+        if not need_rebuild then
+            local inputs = {}
+            for _, list in ipairs({
+                os.files(path.join(kwindir, "src", "**")),
+                os.files(path.join(kwindir, "kwin-ts", "**")),
+                { path.join(kwindir, "tsconfig.json"),
+                  path.join(kwindir, "package.json"),
+                  path.join(kwindir, "pnpm-lock.yaml"),
+                  path.join(kwindir, "esbuild.build.mjs") },
+            }) do
+                for _, file in ipairs(list) do
+                    table.insert(inputs, file)
+                end
+            end
+            for _, file in ipairs(inputs) do
+                local mtime = os.mtime(file)
+                if mtime > 0 and mtime >= bundle_mtime then
+                    need_rebuild = true
+                    break
+                end
+            end
+        end
+        if need_rebuild then
+            print("kwinscript: bundling with esbuild ...")
+            os.exec("pnpm --dir %s build", kwindir)
+        else
+            print("kwinscript: dist/kwinscript.js is up to date")
+        end
     end)
     on_install(function(target)
         -- /usr/share/kwin-api-server/kwinscript.js

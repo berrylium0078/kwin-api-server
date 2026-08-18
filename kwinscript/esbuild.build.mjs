@@ -19,7 +19,12 @@ const options = {
     bundle: true,
     format: "iife", // plain script, no module wrapper — what KWin expects
     platform: "neutral",
-    target: ["es2020"],
+    // KWin evaluates scripts in QJSEngine (Qt's V4 engine): it supports ES6
+    // (Promise, generators, arrow functions, ...) but *not* the ES2017
+    // async/await keywords (KDE bug 478617 / QTBUG-58620), so target es2016
+    // makes esbuild lower async/await to Promise-based generators while
+    // keeping the rest of ES6 native. Do not raise this target.
+    target: ["es2016"],
     outfile: "dist/kwinscript.js",
     legalComments: "none",
     banner: {

@@ -12,6 +12,8 @@ kwinscript/pnpm-workspace.yaml
 .xmake-global/
 .xmake/
 
+__pycache__
+
 # Editor / OS noise
 *.swp
 *~
