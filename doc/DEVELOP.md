@@ -36,6 +36,11 @@ daemon/
     socket_server.{hpp,cpp} sd-event driven unix socket server
     dbus_service.{hpp,cpp} sd-bus session-bus service (name + own interface)
     kwin_client.{hpp,cpp}  KWin scripting D-Bus client (loadScript/run/unloadScript)
+    proto/                 pure socket protocol layer (phase 1, no libsystemd):
+      protocol.hpp           limits + rx_buffer / tx_buffer / client structs
+      rx_buffer.cpp          RX message queue (JSON array splice, poll/drain)
+      tx_buffer.cpp          TX queue (complete frames, push/flush)
+      frame_decoder.cpp      explicit RX state machine (client_read)
   systemd/
     kwin-api-server.service.in user unit template; xmake fills in the install
                               paths and installs the generated file
@@ -165,7 +170,13 @@ Covered areas:
 * `copy_file_overwrite_*` / `stage_kwinscript_*` — file helpers, including
   placeholder substitution and in-place re-staging (`daemon/src/file_util.*`);
 * `socket_server_*` — bind, line protocol, concurrent clients, EOF, max
-  clients (`daemon/src/socket_server.*`).
+  clients (`daemon/src/socket_server.*`);
+* `rx_buffer_*` / `tx_buffer_*` / `proto_*` — the pure socket protocol layer
+  (`daemon/src/proto/*`), driven over `socketpair()`: header splits (1+1+1+1,
+  2+2, full), payload splits, multiple frames in one write, empty JSON values,
+  the 1 MB boundary (near / exactly / over), oversized-frame discard followed
+  by a normal frame, RX-buffer-full pause + resume, TX-buffer-full, peer
+  close, EAGAIN, and a TX flush round-trip.
 
 Add new cases in the existing `test/unit/*.cpp` files; they are picked up
 automatically.

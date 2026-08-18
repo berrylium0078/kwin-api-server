@@ -5,11 +5,20 @@
 > between the three parties — **clients** (unix socket), the **daemon**
 > (`kwin-api-daemon`) and the **KWin script** (`kwinscript.js`, D-Bus).
 >
-> The transport semantics below are frozen and will be implemented in later
-> phases; until then the socket still speaks the interim line protocol
-> described in [§5](#5-interim-line-protocol-still-implemented). The
-> *application* layer (what the JSON payloads mean, the JSONRPC method list)
-> is specified separately in [RPC.md](RPC.md) and is still TBD.
+> The transport semantics below are frozen and are being implemented in
+> phases:
+>
+> * **phase 1 (implemented)** — the pure socket protocol layer in
+>   `daemon/src/proto/*` (`kwin-api-proto`, unit-tested via `socketpair()`):
+>   the frame-decoder state machine (module 1), the RX message queue with the
+>   JSON-array splice (module 2) and the TX queue (module 3). This layer has
+>   **no D-Bus and no libsystemd** dependency; wiring it into the daemon's
+>   event loop and the daemon ↔ script D-Bus interface is a later phase.
+>
+> Until the framed protocol is wired into the daemon, the socket still speaks
+> the interim line protocol described in [§5](#5-interim-line-protocol-still-implemented).
+> The *application* layer (what the JSON payloads mean, the JSONRPC method
+> list) is specified separately in [RPC.md](RPC.md) and is still TBD.
 
 ## 1. Overview and layering
 

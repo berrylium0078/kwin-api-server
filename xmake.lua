@@ -114,6 +114,18 @@ target("kwinscript")
     end)
 
 -- ---------------------------------------------------------------------------
+-- kwin-api-proto: the pure socket protocol layer (phase 1) — framing, RX/TX
+-- queues, the frame-decoder state machine. Deliberately has NO libsystemd or
+-- D-Bus dependency; the daemon's event loop integration comes in a later
+-- phase. Unit-tested via socketpair in kwin-api-test.
+-- ---------------------------------------------------------------------------
+target("kwin-api-proto")
+    set_kind("static")
+    add_files("daemon/src/proto/*.cpp")
+    add_includedirs("daemon/src/proto", {public = true})
+    on_install(function() end)
+
+-- ---------------------------------------------------------------------------
 -- kwin-api-core: static library with the reusable parts (unit-testable).
 -- Linked statically into the daemon, so nothing of it is installed.
 -- ---------------------------------------------------------------------------
@@ -182,7 +194,7 @@ target("kwin-api-daemon")
 -- ---------------------------------------------------------------------------
 target("kwin-api-test")
     set_kind("binary")
-    add_deps("kwin-api-core")
+    add_deps("kwin-api-core", "kwin-api-proto")
     add_files("test/unit/*.cpp")
     add_syslinks("systemd")
     add_tests("unit", {pass_outputs = ".*ALL TESTS PASSED.*"})
