@@ -37,10 +37,10 @@ daemon/
     dbus_service.{hpp,cpp} sd-bus session-bus service (name + own interface)
     kwin_client.{hpp,cpp}  KWin scripting D-Bus client (loadScript/run/unloadScript)
     proto/                 pure socket protocol layer (phase 1, no libsystemd):
-      protocol.hpp           limits + rx_buffer / tx_buffer / client structs
+      protocol.hpp           limits + RxBuffer / TxBuffer / Client classes
       rx_buffer.cpp          RX message queue (JSON array splice, poll/drain)
       tx_buffer.cpp          TX queue (complete frames, push/flush)
-      frame_decoder.cpp      explicit RX state machine (client_read)
+      client.cpp             Client session + explicit RX state machine
   systemd/
     kwin-api-server.service.in user unit template; xmake fills in the install
                               paths and installs the generated file

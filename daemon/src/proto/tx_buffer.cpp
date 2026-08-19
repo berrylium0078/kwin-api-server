@@ -2,8 +2,8 @@
 #include "protocol.hpp"
 
 #include <cerrno>
-#include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 #include <sys/socket.h> // MSG_NOSIGNAL
 #include <unistd.h>
@@ -20,52 +20,38 @@ namespace proto {
 // validated at push() time (length <= 1 MB, capacity), so the flush path only
 // needs to write and stop on EAGAIN — no re-validation.
 
-int tx_buffer_init(tx_buffer* tx, size_t capacity) {
-    if (!tx || capacity < kHeaderLen + 1) {
-        return -EINVAL;
+TxBuffer::TxBuffer(size_t capacity) : capacity_(capacity) {
+    if (capacity < kHeaderLen + 1) {
+        throw std::invalid_argument("TxBuffer: capacity too small");
     }
-    tx->data = static_cast<char*>(std::malloc(capacity));
-    if (!tx->data) {
-        return -ENOMEM;
-    }
-    tx->len = 0;
-    tx->offset = 0;
-    tx->capacity = capacity;
-    return 0;
+    data_ = new char[capacity];
 }
 
-void tx_buffer_free(tx_buffer* tx) {
-    if (!tx) {
-        return;
-    }
-    std::free(tx->data);
-    tx->data = nullptr;
-    tx->len = 0;
-    tx->offset = 0;
-    tx->capacity = 0;
+TxBuffer::~TxBuffer() {
+    delete[] data_;
 }
 
-int tx_buffer_push(tx_buffer* tx, const char* msg, size_t len) {
+int TxBuffer::push(const char* msg, size_t len) {
     if (len > kMaxMessageLen) {
         return -EMSGSIZE; // single-message maximum exceeded
     }
-    if (tx->len + kHeaderLen + len > tx->capacity) {
+    if (len_ + kHeaderLen + len > capacity_) {
         return -ENOBUFS; // TX buffer full: cannot hold this frame
     }
     const uint32_t wire_len = static_cast<uint32_t>(len);
-    std::memcpy(tx->data + tx->len, &wire_len, kHeaderLen);
-    std::memcpy(tx->data + tx->len + kHeaderLen, msg, len);
-    tx->len += kHeaderLen + len;
+    std::memcpy(data_ + len_, &wire_len, kHeaderLen);
+    std::memcpy(data_ + len_ + kHeaderLen, msg, len);
+    len_ += kHeaderLen + len;
     return 0;
 }
 
-ssize_t tx_buffer_flush(tx_buffer* tx, int fd) {
+ssize_t TxBuffer::flush(int fd) {
     ssize_t written = 0;
-    while (tx->offset < tx->len) {
-        const size_t remaining = tx->len - tx->offset;
-        ssize_t n = ::send(fd, tx->data + tx->offset, remaining, MSG_NOSIGNAL);
+    while (offset_ < len_) {
+        const size_t remaining = len_ - offset_;
+        ssize_t n = ::send(fd, data_ + offset_, remaining, MSG_NOSIGNAL);
         if (n > 0) {
-            tx->offset += static_cast<size_t>(n);
+            offset_ += static_cast<size_t>(n);
             written += n;
             continue;
         }
@@ -78,29 +64,11 @@ ssize_t tx_buffer_flush(tx_buffer* tx, int fd) {
         // EPIPE / ECONNRESET / EBADF etc.
         return -errno;
     }
-    if (tx->offset == tx->len) {
-        tx->len = 0;
-        tx->offset = 0;
+    if (offset_ == len_) {
+        len_ = 0;
+        offset_ = 0;
     }
     return written;
-}
-
-bool tx_buffer_pending(const tx_buffer* tx) {
-    return tx->len > tx->offset;
-}
-
-int client_push(client* c, const char* msg, size_t len) {
-    if (!c || c->fd < 0) {
-        return -ENOTCONN;
-    }
-    return tx_buffer_push(&c->tx, msg, len);
-}
-
-ssize_t client_flush(client* c) {
-    if (!c || c->fd < 0) {
-        return -ENOTCONN;
-    }
-    return tx_buffer_flush(&c->tx, c->fd);
 }
 
 } // namespace proto
