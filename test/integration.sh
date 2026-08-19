@@ -149,13 +149,82 @@ grep -q "\[script\] hello-from-integration-test" "$LOG/daemon.log" \
     || fail "daemon did not log the script message"
 
 # ---------------------------------------------------------------------------
-echo "==> unix socket line protocol (two concurrent clients)"
-PING_A="$(printf 'ping\nquit\n' | socat - UNIX-CONNECT:"$WORK/service.socket" 2>/dev/null)"
-[ "$PING_A" = "pong" ] || fail "ping/pong failed on client A (got: '$PING_A')"
-PING_B="$(printf 'ping\nquit\n' | socat - UNIX-CONNECT:"$WORK/service.socket" 2>/dev/null)"
-[ "$PING_B" = "pong" ] || fail "ping/pong failed on client B (got: '$PING_B')"
-STATUS="$(printf 'status\nquit\n' | socat - UNIX-CONNECT:"$WORK/service.socket" 2>/dev/null)"
-[ "$STATUS" = "service=org.example.KwinApiTest" ] || fail "status reply wrong (got: '$STATUS')"
+echo "==> client session: framed protocol + /daemon + /cli1 poll/push"
+command -v dbus-send >/dev/null 2>&1 || { echo "error: dbus-send not found" >&2; exit 1; }
+
+# A background socat keeps one client connection open: stdin from a fifo (so we
+# can send frames at any time), stdout to a file (so we can read pushed frames).
+mkfifo "$WORK/client.in"
+socat - UNIX-CONNECT:"$WORK/service.socket" < "$WORK/client.in" > "$WORK/client.out" 2>/dev/null &
+SOCAT_PID=$!
+exec 3>"$WORK/client.in"   # keep a writer open on the fifo
+
+# poll /daemon must report the connect event (blocks until it arrives)
+DAEMON_POLL="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /daemon \
+    org.example.KwinApiTest.poll int32:5000 2>&1)"
+echo "$DAEMON_POLL" | grep -q '"event":"client_connected","id":1' \
+    || fail "no client_connected control message (got: $DAEMON_POLL)"
+
+# /cli1 poll with no messages and timeout 0 must return the empty array
+CLI_EMPTY="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /cli1 \
+    org.example.KwinApiClient.poll int32:0 2>&1)"
+echo "$CLI_EMPTY" | grep -q '\[\]' \
+    || fail "/cli1 poll timeout=0 should return [] (got: $CLI_EMPTY)"
+
+# send one frame: [len=17]["{"hello":"world"}"]
+printf '\x11\x00\x00\x00{"hello":"world"}' >&3
+CLI_POLL="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /cli1 \
+    org.example.KwinApiClient.poll int32:5000 2>&1)"
+echo "$CLI_POLL" | grep -q '\[{"hello":"world"}\]' \
+    || fail "/cli1 poll did not return the frame (got: $CLI_POLL)"
+
+# push a message to the client: daemon must flush it to the socket
+PUSH_REPLY="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /cli1 \
+    org.example.KwinApiClient.push string:'{"reply":"pong"}' 2>&1)"
+echo "$PUSH_REPLY" | grep -q 'string ""' \
+    || fail "push did not succeed (got: $PUSH_REPLY)"
+for _ in $(seq 1 50); do
+    grep -q '{"reply":"pong"}' "$WORK/client.out" 2>/dev/null && break
+    sleep 0.05
+done
+grep -q '{"reply":"pong"}' "$WORK/client.out" \
+    || fail "client did not receive the pushed frame (out: $(cat "$WORK/client.out" 2>/dev/null))"
+
+# a second concurrent poll must be rejected
+dbus-send --session --print-reply --dest=org.example.KwinApiTest /cli1 \
+    org.example.KwinApiClient.poll int32:3000 > /dev/null 2>&1 &
+POLL_BG=$!
+sleep 0.1
+POLL_2ND="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /cli1 \
+    org.example.KwinApiClient.poll int32:0 2>&1)"
+echo "$POLL_2ND" | grep -q 'a poll is already pending' \
+    || fail "second concurrent poll was not rejected (got: $POLL_2ND)"
+kill "$POLL_BG" 2>/dev/null || true
+wait "$POLL_BG" 2>/dev/null || true
+
+# close the client connection -> /daemon must report the disconnect event
+exec 3>&-
+wait "$SOCAT_PID" 2>/dev/null || true
+DAEMON_POLL2="$(dbus-send --session --print-reply --dest=org.example.KwinApiTest /daemon \
+    org.example.KwinApiTest.poll int32:5000 2>&1)"
+echo "$DAEMON_POLL2" | grep -q '"event":"client_disconnected","id":1' \
+    || fail "no client_disconnected control message (got: $DAEMON_POLL2)"
+
+# ---------------------------------------------------------------------------
+echo "==> oversized frame over the socket: consumed + discarded, connection kept"
+# A frame of 1 MB + 1 payload bytes must be discarded (with an error log), and
+# a normal frame sent right after it must still be delivered.
+BIG_FILE="$WORK/big.bin"
+# 1,000,001 = 0x0F4241, little-endian length prefix
+{ printf '\x41\x42\x0f\x00'; head -c 1000001 /dev/zero | tr '\0' 'x'; } > "$BIG_FILE"
+socat - UNIX-CONNECT:"$WORK/service.socket" < "$BIG_FILE" > /dev/null 2>/dev/null
+# the same connection was closed by the frame, but the discard must be logged
+for _ in $(seq 1 100); do
+    grep -q "discarded oversized frame" "$LOG/daemon.log" 2>/dev/null && break
+    sleep 0.05
+done
+grep -q "discarded oversized frame" "$LOG/daemon.log" \
+    || fail "oversized frame was not logged as discarded"
 
 # ---------------------------------------------------------------------------
 echo "==> graceful shutdown (SIGTERM) -> unloadScript + cleanup"

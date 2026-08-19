@@ -42,7 +42,7 @@ extern char** environ;
 #include "file_util.hpp"
 #include "kwin_client.hpp"
 #include "log.hpp"
-#include "socket_server.hpp"
+#include "server.hpp"
 
 #ifndef KAS_VERSION
 #define KAS_VERSION "unknown"
@@ -149,48 +149,46 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 1) unix socket: bind() service.socket (systemd cleans it up)
-    kas::SocketServer socket_server(config.work_dir / "service.socket", config.max_clients);
-    socket_server.set_status_callback(
-        [&config] { return "service=" + config.service_name; });
-    r = socket_server.start(event);
-    if (r < 0) {
-        kas::log_error("cannot bind socket: " + socket_server.socket_path());
-        sd_event_unref(event);
-        return 1;
-    }
-    kas::log_info("socket bound: " + socket_server.socket_path());
-
-    // 2) session-bus D-Bus service (name released when the connection closes)
+    // 1) session-bus D-Bus service (name released when the connection closes)
     kas::DbusService dbus(config);
     r = dbus.open();
     if (r < 0) {
-        socket_server.stop();
         sd_event_unref(event);
         return 1;
     }
     r = dbus.request_name();
     if (r < 0) {
         dbus.close();
-        socket_server.stop();
         sd_event_unref(event);
         return 1;
     }
     r = dbus.attach(event);
     if (r < 0) {
         dbus.close();
-        socket_server.stop();
         sd_event_unref(event);
         return 1;
     }
     kas::log_info("D-Bus name registered: " + config.service_name +
                   " (object path " + dbus.object_path() + ")");
 
+    // 2) unix socket: bind() service.socket (systemd cleans it up) and manage
+    //    client sessions on the same loop; also registers the /daemon D-Bus
+    //    object (log + poll) and the per-client /cli{id} objects.
+    kas::Server server(config.work_dir / "service.socket", config.max_clients);
+    r = server.start(event, dbus.bus(), dbus.service_name());
+    if (r < 0) {
+        kas::log_error("cannot start server: " + server.socket_path());
+        dbus.close();
+        sd_event_unref(event);
+        return 1;
+    }
+    kas::log_info("socket bound: " + server.socket_path());
+
     // --check: infrastructure verified, nothing else to do.
     if (config.check_only) {
         kas::log_info("check ok: socket bound and D-Bus name registered");
+        server.stop();
         dbus.close();
-        socket_server.stop();
         sd_event_unref(event);
         return 0;
     }
@@ -201,7 +199,7 @@ int main(int argc, char** argv) {
         kas::log_error("KWIN_SCRIPT_PATH does not point to a file: " +
                        config.script_path.string());
         dbus.close();
-        socket_server.stop();
+        server.stop();
         sd_event_unref(event);
         return 1;
     }
@@ -210,7 +208,7 @@ int main(int argc, char** argv) {
     if (!stage_error.empty()) {
         kas::log_error("cannot stage kwinscript.js: " + stage_error);
         dbus.close();
-        socket_server.stop();
+        server.stop();
         sd_event_unref(event);
         return 1;
     }
@@ -238,7 +236,7 @@ int main(int argc, char** argv) {
     if (load.id < 0) {
         kas::log_error("org.kde.kwin.Scripting.loadScript failed: " + load.error);
         dbus.close();
-        socket_server.stop();
+        server.stop();
         sd_event_unref(event);
         return 1;
     }
@@ -249,7 +247,7 @@ int main(int argc, char** argv) {
         kas::log_error("org.kde.kwin.Script.run failed, unloading script");
         kwin.unload_script(config.plugin_name);
         dbus.close();
-        socket_server.stop();
+        server.stop();
         sd_event_unref(event);
         return 1;
     }
@@ -276,10 +274,10 @@ int main(int argc, char** argv) {
     } else {
         kas::log_warn("unloadScript failed (the unit's ExecStopPost retries it)");
     }
+    kas::log_debug("shutdown: stopping socket server");
+    server.stop();
     kas::log_debug("shutdown: closing bus");
     dbus.close();
-    kas::log_debug("shutdown: stopping socket server");
-    socket_server.stop();
     kas::log_debug("shutdown: freeing event loop");
     sd_event_unref(event);
     kas::log_info("exiting");

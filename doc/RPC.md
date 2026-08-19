@@ -2,10 +2,10 @@
 
 > **Status: TBD — placeholder.** This document is not finalized. The
 > *transport* layer (framing, buffers, the daemon ↔ script `poll()`/`push()`
-> interface) is frozen in [PROTOCOL.md](PROTOCOL.md), but the *application*
-> layer — what the JSON payloads mean — is still TBD. Until the framed
-> protocol is implemented, the socket speaks the interim line protocol
-> described in [PROTOCOL.md](PROTOCOL.md) §5.
+> interface) is frozen in [PROTOCOL.md](PROTOCOL.md) and implemented in
+> phases 1–2, but the *application* layer — what the JSON payloads mean — is
+> still TBD. Until it is specified, the socket carries raw JSON payloads that
+> the KWin script receives via `/cli${id}` `poll()`.
 
 ## Transport
 

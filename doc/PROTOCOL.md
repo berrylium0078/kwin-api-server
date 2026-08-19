@@ -12,11 +12,15 @@
 >   `daemon/src/proto/*` (`kwin-api-proto`, unit-tested via `socketpair()`):
 >   the frame-decoder state machine (module 1), the RX message queue with the
 >   JSON-array splice (module 2) and the TX queue (module 3). This layer has
->   **no D-Bus and no libsystemd** dependency; wiring it into the daemon's
->   event loop and the daemon ↔ script D-Bus interface is a later phase.
+>   **no D-Bus and no libsystemd** dependency.
+> * **phase 2 (implemented)** — client session management in the daemon
+>   (`Server`, `ClientSession`, `DaemonDBusObject`, `ClientDBusObject`,
+>   `PollWaiter`): the framed protocol is now the daemon's socket protocol.
+>   The daemon accepts clients, assigns increasing positive integer ids,
+>   serves `/daemon` poll() (log + control messages) and a `/cli${id}` object
+>   per client (poll + push), all multiplexed on one sd-event loop. The
+>   legacy line protocol (`SocketServer`) is superseded.
 >
-> Until the framed protocol is wired into the daemon, the socket still speaks
-> the interim line protocol described in [§5](#5-interim-line-protocol-still-implemented).
 > The *application* layer (what the JSON payloads mean, the JSONRPC method
 > list) is specified separately in [RPC.md](RPC.md) and is still TBD.
 
@@ -121,10 +125,22 @@ default `org.example.KwinApiServer`). The script derives the name from the
 * `id` is a positive integer the daemon assigns when a client connects; it is
   unique among live clients and stable for the connection's lifetime. The
   script learns about clients (their `id`s) from daemon → script
-  notifications delivered through `/daemon` `poll()`; their payload format is
-  application-layer (see [RPC.md](RPC.md)).
-* `log()` is already implemented (`daemon/src/dbus_service.cpp`); `poll()` on
-  `/daemon` and the whole `/cli${id}` interface are planned.
+  notifications delivered through `/daemon` `poll()`.
+* **Control message payloads** (implemented, phase 2): client connect /
+  disconnect events are queued on `/daemon` as JSON objects —
+
+  ```
+  {"event":"client_connected","id":N}
+  {"event":"client_disconnected","id":N}
+  ```
+
+  so a `/daemon` `poll()` returns e.g. `[{"event":"client_connected","id":3}]`.
+  The script uses these to start/stop polling the corresponding `/cli${id}`
+  objects.
+* **Implementation status**: all objects and methods in the table are
+  implemented (`daemon/src/dbus_service.cpp` for the derived path,
+  `daemon/src/daemon_dbus_object.cpp` for `/daemon`, `daemon/src/
+  client_dbus_object.cpp` for `/cli${id}`).
 
 ### 3.2 `poll(timeout: i) -> s` — receiving messages
 
@@ -204,10 +220,11 @@ Queues one message for a client's socket.
 * Outbound messages are validated **once, at `push()` time**; the socket
   write path does not re-validate.
 
-## 5. Interim line protocol (still implemented)
+## 5. Legacy line protocol (superseded)
 
-Until the framed protocol above is implemented, the socket speaks a small
-line protocol (one command per line, `daemon/src/socket_server.*`):
+The framed protocol above is now the daemon's socket protocol (phase 2). The
+pre-framing line protocol (`daemon/src/socket_server.*`) is kept only for its
+unit tests:
 
 ```
 ping    -> pong

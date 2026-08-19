@@ -12,12 +12,13 @@ struct Config;
 // The daemon's own D-Bus service on the session bus. It opens an sd-bus
 // connection (sd_bus_open_user: honors $DBUS_SESSION_BUS_ADDRESS and falls
 // back to $XDG_RUNTIME_DIR/bus), requests the well-known name configured via
-// KWIN_API_SERVICE_NAME and serves two objects: the derived object path (a
-// Status() method, see object_path()) and "/daemon" (log(level, msg), used by
-// the loaded KWin script to write journal lines). The connection is attached
-// to the shared sd-event loop, so one loop drives the unix socket *and*
-// D-Bus. The name is released automatically when the connection closes (and
-// the session bus cleans up on logout).
+// KWIN_API_SERVICE_NAME and serves the derived object path (a Status()
+// method, see object_path()). The script-facing /daemon object (log + poll)
+// is served by DaemonDBusObject; the per-client /cli{id} objects by
+// ClientDBusObject. The connection is attached to the shared sd-event loop,
+// so one loop drives the unix socket *and* D-Bus. The name is released
+// automatically when the connection closes (and the session bus cleans up on
+// logout).
 class DbusService {
 public:
     explicit DbusService(const Config& config);
@@ -49,7 +50,6 @@ public:
     // sd-bus vtable / match callbacks (public so the vtable table in the .cpp
     // can reference them).
     static int method_status(sd_bus_message* message, void* userdata, sd_bus_error* error);
-    static int method_log(sd_bus_message* message, void* userdata, sd_bus_error* error);
     static int on_name_lost(sd_bus_message* message, void* userdata, sd_bus_error* error);
 
 private:

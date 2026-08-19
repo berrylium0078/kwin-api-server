@@ -33,9 +33,18 @@ daemon/
     config.{hpp,cpp}       env-var configuration (pure, unit-tested)
     log.{hpp,cpp}          leveled stderr logging (-> journal under systemd)
     file_util.{hpp,cpp}    script staging + @DAEMON_DBUS_SERVICE@ substitution
-    socket_server.{hpp,cpp} sd-event driven unix socket server
-    dbus_service.{hpp,cpp} sd-bus session-bus service (name + own interface)
+    socket_server.{hpp,cpp} legacy line-protocol socket server (superseded by
+                            Server, kept for its unit tests)
+    dbus_service.{hpp,cpp} sd-bus session-bus service (name + Status object)
     kwin_client.{hpp,cpp}  KWin scripting D-Bus client (loadScript/run/unloadScript)
+    server.{hpp,cpp}       Server: listen/accept, client ids, session map,
+                           /daemon object wiring (connect/disconnect events)
+    client_session.{hpp,cpp} ClientSession: per-client proto::Client + /cli{id}
+                            D-Bus object + sd-event IO multiplexing
+    daemon_dbus_object.{hpp,cpp} /daemon object: log() + poll() (control queue)
+    client_dbus_object.{hpp,cpp} /cli{id} object: poll() + push()
+    poll_waiter.{hpp,cpp}  deferred D-Bus reply helper (async poll timeouts)
+    dbus_util.{hpp,cpp}    shared poll() handler + JSON error encoding
     proto/                 pure socket protocol layer (phase 1, no libsystemd):
       protocol.hpp           limits + RxBuffer / TxBuffer / Client classes
       rx_buffer.cpp          RX message queue (JSON array splice, poll/drain)
@@ -68,41 +77,49 @@ build/                     xmake build directory (and build.ninja)
 
 ### The daemon's own service
 
-The daemon serves two objects on its session-bus name (`KWIN_API_SERVICE_NAME`,
-default `org.example.KwinApiServer`):
+The daemon serves several objects on its session-bus name
+(`KWIN_API_SERVICE_NAME`, default `org.example.KwinApiServer`):
 
 * the object path **derived from the name** (`org.example.KwinApiServer` →
-  `/org/example/KwinApiServer`):
+  `/org/example/KwinApiServer`), served by `DbusService`:
 
   ```
   org.example.KwinApiServer.Status() -> s
   ```
 
-* the fixed path **`/daemon`**, used by the loaded KWin script. The interface
-  name is the same dotted string as the service name, so both follow
-  `KWIN_API_SERVICE_NAME`:
+* the fixed path **`/daemon`**, used by the loaded KWin script
+  (`DaemonDBusObject`). The interface name is the same dotted string as the
+  service name, so both follow `KWIN_API_SERVICE_NAME`:
 
   ```
   <service name>.log(level: s, msg: s) -> ()
+  <service name>.poll(timeout: i) -> s
   ```
 
   `log()` writes `msg` to the daemon's journal output with a `[script]` source
   tag, mapping `level` to the daemon's own log levels
   (`debug` / `info` / `warn` / `error`; anything else is logged as `info`).
+  `poll()` returns daemon → script control messages — client connect /
+  disconnect notifications queued by the `Server`:
+  `{"event":"client_connected","id":N}` /
+  `{"event":"client_disconnected","id":N}` — as a JSON-serialized array
+  string, with the poll() semantics of [PROTOCOL.md](PROTOCOL.md) §3.2.
 
-The frozen transport protocol ([PROTOCOL.md](PROTOCOL.md) §3) extends this
-script-facing interface (planned, not yet implemented):
-
-* `/daemon` gains `poll(timeout: i) -> s` — daemon → script control messages
-  (e.g. client connect/disconnect notifications), returned as a
-  JSON-serialized array string;
 * one object per connected client at `/cli${id}` with the fixed interface
-  `org.example.KwinApiClient`, exposing:
-  * `poll(timeout: i) -> s` — that client's inbound messages (client →
-    script direction);
-  * `push(msg: s) -> s` — queue one message for that client's socket (script
-    → client direction), returning `""` on success or an error string when
-    the message exceeds 1 MB or the client's 16 MB write buffer is full.
+  `org.example.KwinApiClient` (`ClientDBusObject`, owned by `ClientSession`):
+
+  ```
+  org.example.KwinApiClient.poll(timeout: i) -> s
+  org.example.KwinApiClient.push(msg: s) -> s
+  ```
+
+  `poll()` returns that client's inbound messages (client → script direction);
+  `push()` queues one message for that client's socket (script → client
+  direction), returning `""` on success or an error string when the message
+  exceeds 1 MB or the client's 16 MB write buffer is full. Both objects share
+  the poll() semantics (one pending poll per object, timeout 0..25000 ms,
+  JSON-encoded error strings) via `dbus_util::handle_poll_request` and
+  `PollWaiter` (deferred sd-bus replies + timeout timers).
 
 `Introspect` is provided automatically by sd-bus.
 
@@ -200,7 +217,11 @@ It verifies:
 * `loadScript`/`run` call sequence and arguments on the mock;
 * the daemon's `log()` method: a `dbus-send` call to `/daemon` must appear as
   `[script] ...` in the daemon log;
-* the unix socket line protocol (two concurrent clients: ping/pong, status);
+* client session management over the framed protocol: `/daemon` poll()
+  reports the connect/disconnect control messages, `/cli1` poll() returns a
+  frame sent over the socket, push() flushes a frame back to the client, a
+  second concurrent poll is rejected, and an oversized socket frame is
+  consumed + discarded (with an error log) while the connection stays up;
 * graceful shutdown (SIGTERM) → `unloadScript` + socket cleanup.
 
 ### Manual test run — `run.sh`
