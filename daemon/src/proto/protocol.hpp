@@ -11,7 +11,8 @@
 //                ("[msg1,msg2,") without parsing; poll() turns the trailing
 //                ',' into ']'
 //   3. TxBuffer  TX queue: complete frames "[len][payload][len]..." to be
-//                flushed to the socket
+//                flushed to the socket; circular buffer (flushed space is
+//                reused immediately)
 //
 // All lengths follow the frozen protocol: 1 MB = 1,000,000 payload bytes
 // (decimal), 16 MB = 16,000,000 bytes per direction (decimal), and the frame
@@ -108,15 +109,26 @@ public:
     // EAGAIN) or a negative errno on error. Resets once everything is flushed.
     ssize_t flush(int fd);
 
-    bool pending() const { return len_ > offset_; }
+    // Bytes queued but not yet flushed to the socket.
+    bool pending() const { return len_ > 0; }
     size_t len() const { return len_; }
     size_t capacity() const { return capacity_; }
 
 private:
+    // Copy `n` bytes into the ring at the write position, wrapping around at
+    // `capacity_`; `len_` grows accordingly. The caller has verified that the
+    // frame fits (len_ + n <= capacity_).
+    void write_ring(const char* src, size_t n);
+
+    // Ring buffer: `head_` is the next byte to flush, `tail_` the next byte
+    // to write, `len_` the queued (not yet flushed) bytes. Wrapping means
+    // space freed by a partial flush is immediately reusable — a linear
+    // buffer would have to wait until everything was drained.
     char* data_ = nullptr;      // owned buffer of capacity_ bytes
-    size_t len_ = 0;            // queued bytes
-    size_t offset_ = 0;         // bytes already flushed to the socket
     size_t capacity_ = 0;
+    size_t head_ = 0;           // read position (next byte to send)
+    size_t tail_ = 0;           // write position (next byte to append)
+    size_t len_ = 0;            // queued bytes
 };
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,8 @@ daemon/
     proto/                 pure socket protocol layer (phase 1, no libsystemd):
       protocol.hpp           limits + RxBuffer / TxBuffer / Client classes
       rx_buffer.cpp          RX message queue (JSON array splice, poll/drain)
-      tx_buffer.cpp          TX queue (complete frames, push/flush)
+      tx_buffer.cpp          TX queue (circular buffer: complete frames,
+                             push/flush; flushed space is reused immediately)
       client.cpp             Client session + explicit RX state machine
   systemd/
     kwin-api-server.service.in user unit template; xmake fills in the install
@@ -193,7 +194,8 @@ Covered areas:
   2+2, full), payload splits, multiple frames in one write, empty JSON values,
   the 1 MB boundary (near / exactly / over), oversized-frame discard followed
   by a normal frame, RX-buffer-full pause + resume, TX-buffer-full, peer
-  close, EAGAIN, and a TX flush round-trip.
+  close, EAGAIN, a TX flush round-trip, and TX ring wrap-around (partial
+  flushes interleaved with pushes must reuse flushed space).
 
 Add new cases in the existing `test/unit/*.cpp` files; they are picked up
 automatically.

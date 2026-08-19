@@ -78,7 +78,10 @@ message limit above):
   until complete frames can be extracted, plus the payloads of complete
   frames that are still queued for the script. `poll()` drains it.
 * **write buffer** (daemon → client): holds complete frames queued by the
-  script via `push()` until they are flushed to the socket.
+  script via `push()` until they are flushed to the socket. It is implemented
+  as a **circular buffer** (`TxBuffer`): space freed by a partial flush is
+  reused immediately, so a slow client's `push()`es only block when the whole
+  16 MB is genuinely full.
 
 **Inbound processing (client → daemon):**
 

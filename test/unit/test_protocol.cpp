@@ -129,6 +129,65 @@ TEST(tx_buffer_push_limits) {
     CHECK_EQ(tx.push(big.data(), big.size()), -EMSGSIZE);
 }
 
+// The TX buffer is a ring: interleaving partial flushes with pushes must let
+// the write position wrap around the capacity and reuse flushed space. A
+// linear buffer would hold the whole queued prefix and reject every push
+// until the queue had fully drained.
+TEST(tx_buffer_ring_wraps_and_reuses_space) {
+    int sv[2];
+    CHECK_EQ(make_socketpair(sv), 0);
+    // Shrink the socket buffers so a flush of the 8 KB ring is only partial
+    // (unix sockets keep a few KB in flight) — this forces wrap-around and
+    // space reuse across many pushes.
+    int snd = 2048;
+    int rcv = 2048;
+    CHECK_EQ(::setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd)), 0);
+    CHECK_EQ(::setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv)), 0);
+    TxBuffer tx(8192);
+
+    const std::string payload(500, 'x'); // frame = 504 bytes
+    std::string expected;
+    std::string got;
+    char buf[8192];
+    // Drain whatever the peer has received so far into `got`.
+    auto drain_peer = [&] {
+        for (;;) {
+            ssize_t r = ::read(sv[1], buf, sizeof(buf));
+            if (r > 0) {
+                got.append(buf, static_cast<size_t>(r));
+                continue;
+            }
+            if (r < 0 && errno == EINTR) {
+                continue;
+            }
+            break; // EAGAIN or EOF
+        }
+    };
+
+    constexpr size_t kTargetFrames = 64; // 64 * 504 = 32 KB >> 8 KB capacity
+    for (size_t i = 0; i < kTargetFrames; ++i) {
+        while (tx.push(payload.data(), payload.size()) != 0) {
+            // ring full: flush what we can, drain the peer, retry
+            CHECK(tx.flush(sv[0]) >= 0);
+            drain_peer();
+        }
+        const uint32_t len = static_cast<uint32_t>(payload.size());
+        expected.append(reinterpret_cast<const char*>(&len), kas::proto::kHeaderLen);
+        expected.append(payload);
+    }
+    // We queued far more than the 8 KB capacity — the ring reused flushed
+    // space instead of failing with -ENOBUFS forever.
+    CHECK(expected.size() > tx.capacity());
+
+    // Drain the TX queue, reading the peer in between so the socket empties.
+    while (tx.pending()) {
+        CHECK(tx.flush(sv[0]) >= 0);
+        drain_peer();
+    }
+    drain_peer();
+    CHECK_EQ(got, expected);
+}
+
 // --- module 1: frame decoder (state machine) -------------------------------
 
 TEST(proto_header_read_full) {
