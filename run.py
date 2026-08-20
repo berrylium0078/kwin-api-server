@@ -4,6 +4,11 @@
 # run.py — (re)build/install (optional), start and follow kwin-api-server logs.
 #
 #   ./run.py            stop the service -> start it -> follow its logs
+#   ./run.py --no-follow
+#                       stop the service -> start it -> print the socket path
+#                       and exit, leaving the service RUNNING (useful for
+#                       tests, which take over the lifecycle and stop the
+#                       unit themselves)
 #   ./run.py --build    additionally: xmake build -> xmake install -o stage
 #                       (staged install) -> systemctl link + daemon-reload so
 #                       systemctl picks up the freshly built .service under
@@ -20,6 +25,7 @@
 # ~/.config/systemd/user/kwin-api-server.service.
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -100,6 +106,10 @@ def main():
                         help="build with xmake, staged-install to ./stage via "
                              "`xmake install -o stage`, then link + "
                              "daemon-reload so systemctl picks up the new unit")
+    parser.add_argument("--no-follow", action="store_true",
+                        help="start the service, print the socket path and "
+                             "exit WITHOUT following the logs or stopping the "
+                             "service (the caller owns the lifecycle)")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _raise_interrupt)
@@ -118,14 +128,24 @@ def main():
         print(f"==> starting {UNIT_NAME}")
         start_service()
 
+        if args.no_follow:
+            socket_path = os.path.join(
+                os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+                "kwin-api-server", "service.socket")
+            print(f"==> service running; socket: {socket_path}")
+            print("    (leave it running; stop it later with "
+                  f"`systemctl --user stop {UNIT_NAME}`)")
+            return 0
+
         print("==> following logs (Ctrl+C to stop)")
         follow_logs()
     finally:
-        # Stop the service and print the hint on every exit path: normal,
-        # Ctrl+C, or an error.
-        print("==> stopping the service")
-        stop_service()
-        print_removal_hint()
+        if not args.no_follow:
+            # Stop the service and print the hint on every exit path: normal,
+            # Ctrl+C, or an error.
+            print("==> stopping the service")
+            stop_service()
+            print_removal_hint()
     return 0
 
 

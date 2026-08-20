@@ -57,20 +57,35 @@ daemon/
                               (-> <prefix>/lib/systemd/user)
     kwinscript-unload.sh      ExecStopPost safety net (-> <prefix>/libexec)
 kwinscript/
-  src/index.ts             the KWin script (bundled by esbuild)
-  kwin-ts/                 KWin scripting API TS declarations (ambient package,
-                           wired into the typecheck via tsconfig.json typeRoots)
+  src/
+    index.ts             the KWin script entry (bundled by esbuild)
+    dbus.ts              Promise wrappers around KWin's callDBus(): the
+                         daemon's log()/poll()/push() interface
+    jsonrpc.ts           the shared JSON-RPC server (json-rpc-2.0) +
+                         registerMethod(name, zodSchema, handler): params
+                         validated with zod, failures become -32602 errors
+    clients.ts           daemon control loop (/daemon poll) + one poll loop
+                         per client (/cli{id} poll -> dispatch -> push)
+    tokens.ts            the window-claim token protocol (doc/RPC.md §2):
+                         token registry, window-event wiring, validation
+                         state machine, timeout timers
+  kwin-ts/               KWin scripting API TS declarations (ambient package,
+                         wired into the typecheck via tsconfig.json typeRoots)
   tsconfig.json / package.json / esbuild.build.mjs
-  dist/kwinscript.js       generated single-file bundle
+  dist/kwinscript.js     generated single-file bundle
 test/
   unit/                    C++ unit tests (kwin-api-test, `xmake test`)
   daemon/                  Python end-to-end test against the real systemd
                            user service (mock service unit + test_daemon.py)
+  rpc/                     Python end-to-end test of the JSON-RPC window-claim
+                           protocol (test_rpc.py): real service via run.py +
+                           real PyQt6 windows in a Plasma session
 doc/
   DEVELOP.md               this document
   PROTOCOL.md              communication protocol — transport layer frozen
-                           (phase 0); implementation pending
-  RPC.md                   JSONRPC methods (TBD, placeholder)
+                           (phase 0), implemented
+  RPC.md                   JSON-RPC application layer — window-claim token
+                           protocol implemented, more methods planned
 build/                     xmake build directory (and build.ninja)
 ```
 
@@ -254,6 +269,31 @@ push errors, push() write-buffer-full, object lifetime after disconnect, and
 the log() surface. On exit the service is stopped and the user is reminded to
 remove the `systemctl --user link` (`~/.config/systemd/user/
 kwin-api-server-test.service`).
+
+### JSON-RPC window-claim test — `test/rpc/test_rpc.py`
+
+A Python end-to-end test of the **application layer** (doc/RPC.md §2) against
+the **real service** in a real Plasma session. It starts `kwin-api-server.service`
+through run.py (`./run.py --no-follow`, optionally `--build`), then plays
+several JSON-RPC clients over the unix socket and creates / renames / closes
+**real windows with PyQt6** to drive the token protocol through its actual
+KWin window events. Requires PyQt6.
+
+```sh
+./run.py --build              # once: build + staged install
+python3 test/rpc/test_rpc.py  # afterwards (or: python3 test/rpc/test_rpc.py --build)
+```
+
+Covers every boundary case of the token protocol: basic validation (window
+info in `token.validated`), the validate-phase timeout, `window_closed`,
+`ambiguous` (two windows sharing the prefix), `superseded` (another — possibly
+different — client claims the same window), multi-client isolation, free
+renames after validation, disconnect cleanup, and the JSON-RPC error surface
+(`-32602` invalid params via zod, `-32601` unknown method).
+
+The daemon is transport-only: **all** application logic lives in the KWin
+script (`kwinscript/src/jsonrpc.ts` + `clients.ts` + `tokens.ts`), so this
+test runs against the real daemon with the real bundle.
 
 ## Notes / troubleshooting
 

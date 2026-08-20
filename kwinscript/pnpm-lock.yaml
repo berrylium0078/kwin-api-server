@@ -7,6 +7,13 @@ settings:
 importers:
 
   .:
+    dependencies:
+      json-rpc-2.0:
+        specifier: ^1.7.1
+        version: 1.7.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       esbuild:
         specifier: ^0.25.0
@@ -178,10 +185,16 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  json-rpc-2.0@1.7.1:
+    resolution: {integrity: sha512-JqZjhjAanbpkXIzFE7u8mE/iFblawwlXtONaCvRqI+pyABVz7B4M1EUNpyVW+dZjqgQ2L5HFmZCmOCgUKm00hg==}
+
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
+
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
 
@@ -292,4 +305,8 @@ snapshots:
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
 
+  json-rpc-2.0@1.7.1: {}
+
   typescript@5.9.3: {}
+
+  zod@3.25.76: {}

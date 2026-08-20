@@ -22,3 +22,6 @@ test/daemon/kwin-api-server-test.service
 *.swp
 *~
 .DS_Store
+
+# Dev-only probe scripts (not part of the deliverable)
+.probe/

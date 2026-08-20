@@ -25,6 +25,10 @@ const options = {
     // makes esbuild lower async/await to Promise-based generators while
     // keeping the rest of ES6 native. Do not raise this target.
     target: ["es2016"],
+    // platform "neutral" ignores the "main" package field by default; the
+    // runtime dependencies (json-rpc-2.0 is CommonJS, zod is ESM) must be
+    // resolved explicitly.
+    mainFields: ["main", "module"],
     outfile: "dist/kwinscript.js",
     legalComments: "none",
     banner: {

@@ -26,9 +26,12 @@ transport protocol is frozen (phase 0) and implemented in phases 1–2 — see
 [doc/PROTOCOL.md](doc/PROTOCOL.md) for the length-prefixed JSON framing, the
 per-client buffers, the daemon ↔ script `poll()`/`push()` interface and the
 client session management (Server / ClientSession). The JSONRPC method layer
-on top of the transport is still being specified ([doc/RPC.md](doc/RPC.md));
-the socket currently carries raw JSON payloads that the KWin script receives
-via `/cli${id}` `poll()`.
+on top of the transport is specified in [doc/RPC.md](doc/RPC.md) and
+implemented in the KWin script (`kwinscript/src/*.ts`): the script wraps the
+D-Bus `poll()`/`push()` interface into message loops that dispatch client
+requests through a shared JSON-RPC server (json-rpc-2.0), with zod-validated
+params. The first application protocol — **window claiming via tokens** — is
+implemented (see [doc/RPC.md](doc/RPC.md) §2).
 
 ## Requirements
 
@@ -164,4 +167,6 @@ gone.
   per-direction buffers) and daemon ↔ script D-Bus interface
   (`poll` / `push`). **Transport frozen (phase 0); implemented in
   phases 1–2.**
-* [doc/RPC.md](doc/RPC.md) — supported JSONRPC methods. **TBD, placeholder.**
+* [doc/RPC.md](doc/RPC.md) — the JSON-RPC application layer: methods,
+  notifications and the window-claim token protocol. **First method
+  implemented (tokens); more planned.**

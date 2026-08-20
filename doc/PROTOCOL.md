@@ -22,7 +22,8 @@
 >   legacy line protocol (`SocketServer`) is superseded.
 >
 > The *application* layer (what the JSON payloads mean, the JSONRPC method
-> list) is specified separately in [RPC.md](RPC.md) and is still TBD.
+> list) is specified separately in [RPC.md](RPC.md); the first protocol
+> (window claiming via tokens) is implemented.
 
 ## 1. Overview and layering
 
@@ -239,6 +240,6 @@ quit    -> server closes the connection
 ## See also
 
 * [RPC.md](RPC.md) — application layer: JSONRPC methods and payload formats
-  (TBD).
+  (window-claim token protocol implemented).
 * [DEVELOP.md](DEVELOP.md) — implementation notes and the D-Bus interface
   as implemented today.
