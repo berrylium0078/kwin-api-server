@@ -29,6 +29,13 @@ struct Config {
     // Maximum number of concurrently connected unix-socket clients
     // (KWIN_MAX_CLIENTS).
     int max_clients = 64;
+    // Per-client read/write buffer capacities in bytes (KWIN_RX_BUFFER_CAP /
+    // KWIN_TX_BUFFER_CAP). 0 (default) -> the protocol default (16 MB, see
+    // proto::kDefaultBufferCap). Smaller values make the RX/TX backpressure of
+    // PROTOCOL.md §2.3 reachable with less data — the test/daemon integration
+    // tests set these to a few KB so they do not need to push megabytes.
+    size_t rx_buffer_cap = 0;
+    size_t tx_buffer_cap = 0;
     // Verbose logging (KWIN_DEBUG=1).
     bool debug = false;
 

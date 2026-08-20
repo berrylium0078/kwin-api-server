@@ -71,6 +71,8 @@ void print_usage(FILE* out) {
         "  KWIN_LOAD_RETRIES      loadScript retries while KWin is unreachable (default 30)\n"
         "  KWIN_LOAD_RETRY_DELAY_MS  delay between retries in ms (default 1000)\n"
         "  KWIN_MAX_CLIENTS       max concurrent unix-socket clients (default 64)\n"
+        "  KWIN_RX_BUFFER_CAP     per-client read buffer capacity in bytes (0 = default 16000000)\n"
+        "  KWIN_TX_BUFFER_CAP     per-client write buffer capacity in bytes (0 = default 16000000)\n"
         "  KWIN_DEBUG=1           verbose logging\n");
 }
 
@@ -174,7 +176,8 @@ int main(int argc, char** argv) {
     // 2) unix socket: bind() service.socket (systemd cleans it up) and manage
     //    client sessions on the same loop; also registers the /daemon D-Bus
     //    object (log + poll) and the per-client /cli{id} objects.
-    kas::Server server(config.work_dir / "service.socket", config.max_clients);
+    kas::Server server(config.work_dir / "service.socket", config.max_clients,
+                       config.rx_buffer_cap, config.tx_buffer_cap);
     r = server.start(event, dbus.bus(), dbus.service_name());
     if (r < 0) {
         kas::log_error("cannot start server: " + server.socket_path());

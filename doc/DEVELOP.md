@@ -64,8 +64,8 @@ kwinscript/
   dist/kwinscript.js       generated single-file bundle
 test/
   unit/                    C++ unit tests (kwin-api-test, `xmake test`)
-  mock_kwin.cpp            mock org.kde.KWin (sd-bus) for integration tests
-  integration.sh           automated end-to-end test (private bus + mock)
+  daemon/                  Python end-to-end test against the real systemd
+                           user service (mock service unit + test_daemon.py)
 doc/
   DEVELOP.md               this document
   PROTOCOL.md              communication protocol — transport layer frozen
@@ -200,32 +200,6 @@ Covered areas:
 Add new cases in the existing `test/unit/*.cpp` files; they are picked up
 automatically.
 
-### Integration test — `test/integration.sh`
-
-End-to-end test against a **private session bus** with a **mock
-`org.kde.KWin`** (`kwin-api-mock`, `test/mock_kwin.cpp`) — no real KWin
-needed. Prerequisites: `dbus-daemon`, `socat`, `dbus-send` (and the built
-binaries from `xmake`).
-
-```sh
-test/integration.sh
-```
-
-It verifies:
-
-* `--check` mode (socket bound + D-Bus name registered);
-* script staging: the fake bundle's `@DAEMON_DBUS_SERVICE@` placeholder is
-  substituted with the runtime service name in the staged copy;
-* `loadScript`/`run` call sequence and arguments on the mock;
-* the daemon's `log()` method: a `dbus-send` call to `/daemon` must appear as
-  `[script] ...` in the daemon log;
-* client session management over the framed protocol: `/daemon` poll()
-  reports the connect/disconnect control messages, `/cli1` poll() returns a
-  frame sent over the socket, push() flushes a frame back to the client, a
-  second concurrent poll is rejected, and an oversized socket frame is
-  consumed + discarded (with an error log) while the connection stays up;
-* graceful shutdown (SIGTERM) → `unloadScript` + socket cleanup.
-
 ### Manual test run — `run.sh`
 
 A foreground variant for poking at things by hand. It starts a private
@@ -254,6 +228,32 @@ Ctrl+C stops the daemon and tears down the mock and the private bus.
 ./run.py --build    # + rebuild with xmake, staged-install to ./stage,
                     #   systemctl link + daemon-reload, then start
 ```
+
+### systemd-based integration test — `test/daemon/test_daemon.py`
+
+A Python end-to-end test that runs the **real daemon under the real systemd
+user manager**. It links/starts/stops a mock service unit (`test/daemon/
+kwin-api-server-test.service`, generated from `...service.in`) that makes the
+daemon load an **empty script** (`test/daemon/empty-kwinscript.js`) instead of
+the built bundle, then plays the roles of *several socket clients* and of
+*the KWin script* at the same time, talking to the daemon over both the unix
+socket and its session-bus D-Bus objects (`/daemon`, `/cli{id}`).
+
+```sh
+python3 test/daemon/test_daemon.py      # after `xmake`
+```
+
+It needs a running systemd user manager, a session bus and the **real KWin of
+a Plasma session** (the daemon loads the empty script into `org.kde.KWin`, so
+the name must be owned). The mock unit sets small
+`KWIN_RX_BUFFER_CAP`/`KWIN_TX_BUFFER_CAP` so backpressure tests reachable with
+a few hundred KB instead of megabytes. Focus is the D-Bus call semantics that
+the C++ unit tests cannot cover: poll() batching/FIFO, blocking-timeout
+behaviour, concurrent-poll rejection, JSON-encoded poll errors vs. plain-text
+push errors, push() write-buffer-full, object lifetime after disconnect, and
+the log() surface. On exit the service is stopped and the user is reminded to
+remove the `systemctl --user link` (`~/.config/systemd/user/
+kwin-api-server-test.service`).
 
 ## Notes / troubleshooting
 

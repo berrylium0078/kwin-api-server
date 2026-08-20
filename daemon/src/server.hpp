@@ -25,7 +25,10 @@ namespace kas {
 // {"event":"client_disconnected","id":N}).
 class Server {
 public:
-    Server(std::filesystem::path socket_path, int max_clients);
+    // rx_buffer_cap / tx_buffer_cap: per-client RX/TX buffer capacities in
+    // bytes; 0 -> the protocol default (16 MB, see proto::Client).
+    Server(std::filesystem::path socket_path, int max_clients,
+           size_t rx_buffer_cap = 0, size_t tx_buffer_cap = 0);
     ~Server();
 
     Server(const Server&) = delete;
@@ -53,6 +56,8 @@ private:
 
     std::string socket_path_;
     int max_clients_ = 64;
+    size_t rx_buffer_cap_ = 0;
+    size_t tx_buffer_cap_ = 0;
     int listen_fd_ = -1;
     sd_event* event_ = nullptr;
     sd_bus* bus_ = nullptr;

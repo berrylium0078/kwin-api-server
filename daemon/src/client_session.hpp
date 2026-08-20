@@ -31,7 +31,10 @@ class Server;
 // event and destroys the session.
 class ClientSession {
 public:
-    ClientSession(uint64_t id, int fd, sd_event* event, sd_bus* bus, Server* server);
+    // rx_buffer_cap / tx_buffer_cap: per-client RX/TX buffer capacities in
+    // bytes; 0 -> the protocol default (16 MB, see proto::Client).
+    ClientSession(uint64_t id, int fd, sd_event* event, sd_bus* bus, Server* server,
+                  size_t rx_buffer_cap = 0, size_t tx_buffer_cap = 0);
     ~ClientSession();
 
     ClientSession(const ClientSession&) = delete;

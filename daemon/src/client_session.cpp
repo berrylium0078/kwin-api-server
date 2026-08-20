@@ -19,8 +19,9 @@ using kas::proto::read_result;
 
 } // namespace
 
-ClientSession::ClientSession(uint64_t id, int fd, sd_event* event, sd_bus* bus, Server* server)
-    : id_(id), server_(server), event_(event), fd_(fd), client_(fd) {
+ClientSession::ClientSession(uint64_t id, int fd, sd_event* event, sd_bus* bus, Server* server,
+                             size_t rx_buffer_cap, size_t tx_buffer_cap)
+    : id_(id), server_(server), event_(event), fd_(fd), client_(fd, rx_buffer_cap, tx_buffer_cap) {
     dbus_ = std::make_unique<ClientDBusObject>(*this, bus, event, id);
     int r = sd_event_add_io(event, &io_source_, fd_, EPOLLIN, on_io, this);
     if (r < 0) {

@@ -106,6 +106,8 @@ follow the logs; on exit it stops the service again.
 | `KWIN_LOAD_RETRIES` | `30` | `loadScript` retries while KWin is unreachable |
 | `KWIN_LOAD_RETRY_DELAY_MS` | `1000` | delay between retries |
 | `KWIN_MAX_CLIENTS` | `64` | max concurrent unix-socket clients |
+| `KWIN_RX_BUFFER_CAP` | `0` (16 MB) | per-client read buffer capacity in bytes (see PROTOCOL.md §2.3; smaller values make read backpressure reachable with less data) |
+| `KWIN_TX_BUFFER_CAP` | `0` (16 MB) | per-client write buffer capacity in bytes (smaller values make `push()` fail with a full buffer sooner) |
 | `KWIN_DEBUG` | – | `1` enables verbose logging |
 
 Admin overrides can be dropped in `/etc/kwin-api-server/env`
@@ -155,7 +157,8 @@ gone.
 
 * [doc/DEVELOP.md](doc/DEVELOP.md) — development guide: project structure,
   D-Bus interface, how the KWin script is started, and how to test the
-  project (unit tests, integration test, `run.sh` manual run, `run.py`).
+  project (unit tests, the systemd-based end-to-end test in `test/daemon`,
+  `run.sh` manual run, `run.py`).
 * [doc/PROTOCOL.md](doc/PROTOCOL.md) — communication protocol: client ↔
   daemon framing (length-prefixed UTF-8 JSON, 1 MB message limit, 16 MB
   per-direction buffers) and daemon ↔ script D-Bus interface

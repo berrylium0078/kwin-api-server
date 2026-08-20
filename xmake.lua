@@ -199,13 +199,3 @@ target("kwin-api-test")
     add_syslinks("systemd")
     add_tests("unit", {pass_outputs = ".*ALL TESTS PASSED.*"})
     on_install(function() end)
-
--- ---------------------------------------------------------------------------
--- kwin-api-mock: mock org.kde.KWin D-Bus service used by test/integration.sh
--- to exercise the daemon end-to-end without a real KWin session. Not installed.
--- ---------------------------------------------------------------------------
-target("kwin-api-mock")
-    set_kind("binary")
-    add_files("test/mock_kwin.cpp")
-    add_syslinks("systemd")
-    on_install(function() end)

@@ -14,6 +14,10 @@ kwinscript/pnpm-workspace.yaml
 
 __pycache__
 
+# test/daemon: the concrete mock-service unit is rendered by test_daemon.py
+# from kwin-api-server-test.service.in (machine-specific absolute paths)
+test/daemon/kwin-api-server-test.service
+
 # Editor / OS noise
 *.swp
 *~

@@ -1,0 +1,44 @@
+# test/daemon — mock service for kwin-api-daemon.
+#
+# Runs the REAL daemon binary under the real systemd user manager, but with
+# KWIN_SCRIPT_PATH pointing at the empty test/daemon/empty-kwinscript.js
+# instead of the built kwinscript bundle: the daemon loads and runs the empty
+# script, so nothing happens inside KWin and the Python test can play the
+# script's role over D-Bus (poll/push/log).
+#
+# The machine-specific paths (@DAEMON_BIN@, @SCRIPT_PATH@, @UNLOAD_HELPER@)
+# are substituted by test_daemon.py into kwin-api-server-test.service before
+# `systemctl --user link`.
+#
+# Deliberately small KWIN_RX_BUFFER_CAP / KWIN_TX_BUFFER_CAP and
+# KWIN_MAX_CLIENTS: the test exercises the RX/TX backpressure of
+# PROTOCOL.md §2.3 and the client limit with a few hundred KB and a handful of
+# sockets instead of megabytes / 64 connections. Restart=no so a daemon crash
+# is visible to the test instead of being silently restarted.
+
+[Unit]
+Description=KWin API Server (test/daemon mock) - loads an empty script
+After=plasma-kwin_wayland.service
+
+[Service]
+Type=exec
+
+RuntimeDirectory=kwin-api-server-test
+WorkingDirectory=%t/kwin-api-server-test
+
+Environment=KWIN_API_SERVICE_NAME=@SERVICE_NAME@
+Environment=KWIN_SCRIPT_PATH=@SCRIPT_PATH@
+Environment=KWIN_PLUGIN_NAME=kwin-api-server-test
+Environment=KWIN_LOAD_RETRIES=3
+Environment=KWIN_RX_BUFFER_CAP=@RX_CAP@
+Environment=KWIN_TX_BUFFER_CAP=@TX_CAP@
+Environment=KWIN_MAX_CLIENTS=@MAX_CLIENTS@
+Environment=KWIN_DEBUG=1
+
+ExecStart=@DAEMON_BIN@
+
+# Safety net that mirrors the production unit: unload the (empty) script when
+# the daemon is killed hard.
+ExecStopPost=@UNLOAD_HELPER@
+
+Restart=no

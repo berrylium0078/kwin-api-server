@@ -33,6 +33,8 @@ TEST(config_full_environment) {
         {"KWIN_LOAD_RETRIES", "5"},
         {"KWIN_LOAD_RETRY_DELAY_MS", "250"},
         {"KWIN_MAX_CLIENTS", "8"},
+        {"KWIN_RX_BUFFER_CAP", "65536"},
+        {"KWIN_TX_BUFFER_CAP", "131072"},
         {"KWIN_DEBUG", "1"},
     };
     kas::Config cfg = kas::load_config(env, {});
@@ -44,6 +46,8 @@ TEST(config_full_environment) {
     CHECK_EQ(cfg.load_retries, 5);
     CHECK_EQ(cfg.load_retry_delay_ms, 250);
     CHECK_EQ(cfg.max_clients, 8);
+    CHECK_EQ(cfg.rx_buffer_cap, 65536u);
+    CHECK_EQ(cfg.tx_buffer_cap, 131072u);
     CHECK(cfg.debug);
 }
 
@@ -65,18 +69,28 @@ TEST(config_bad_values) {
         {"KWIN_PLUGIN_NAME", "p"},
         {"KWIN_LOAD_RETRIES", "abc"},
         {"KWIN_MAX_CLIENTS", "0"},
+        {"KWIN_RX_BUFFER_CAP", "1"},     // below the 64-byte minimum
+        {"KWIN_TX_BUFFER_CAP", "-5"},    // negative
         {"KWIN_API_SERVICE_NAME", "org..bad"},
     };
     kas::Config cfg = kas::load_config(env, {});
     bool has_retries = false, has_clients = false, has_name = false;
+    bool has_rx_cap = false, has_tx_cap = false;
     for (const auto& e : cfg.errors) {
         has_retries = has_retries || e.find("KWIN_LOAD_RETRIES") != std::string::npos;
         has_clients = has_clients || e.find("KWIN_MAX_CLIENTS") != std::string::npos;
         has_name = has_name || e.find("KWIN_API_SERVICE_NAME") != std::string::npos;
+        has_rx_cap = has_rx_cap || e.find("KWIN_RX_BUFFER_CAP") != std::string::npos;
+        has_tx_cap = has_tx_cap || e.find("KWIN_TX_BUFFER_CAP") != std::string::npos;
     }
     CHECK(has_retries);
     CHECK(has_clients);
     CHECK(has_name);
+    CHECK(has_rx_cap);
+    CHECK(has_tx_cap);
+    // a failed parse must not leak a bogus capacity
+    CHECK_EQ(cfg.rx_buffer_cap, 0u);
+    CHECK_EQ(cfg.tx_buffer_cap, 0u);
 }
 
 TEST(dbus_name_validation) {

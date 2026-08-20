@@ -26,8 +26,12 @@ std::string control_message(const char* event_name, uint64_t id) {
 
 } // namespace
 
-Server::Server(std::filesystem::path socket_path, int max_clients)
-    : socket_path_(socket_path.string()), max_clients_(max_clients > 0 ? max_clients : 64) {}
+Server::Server(std::filesystem::path socket_path, int max_clients, size_t rx_buffer_cap,
+               size_t tx_buffer_cap)
+    : socket_path_(socket_path.string()),
+      max_clients_(max_clients > 0 ? max_clients : 64),
+      rx_buffer_cap_(rx_buffer_cap),
+      tx_buffer_cap_(tx_buffer_cap) {}
 
 Server::~Server() {
     stop();
@@ -123,7 +127,8 @@ int Server::accept_clients() {
         }
 
         const uint64_t id = next_id_++;
-        auto session = std::make_unique<ClientSession>(id, client_fd, event_, bus_, this);
+        auto session = std::make_unique<ClientSession>(id, client_fd, event_, bus_, this,
+                                                       rx_buffer_cap_, tx_buffer_cap_);
         if (!session->ok()) {
             log_error("client " + std::to_string(id) + ": session setup failed, dropping");
             continue; // ClientSession destructor closes client_fd

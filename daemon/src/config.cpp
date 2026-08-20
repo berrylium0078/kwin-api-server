@@ -15,7 +15,16 @@ const char* kEnvWorkDir = "KWIN_WORK_DIR";
 const char* kEnvLoadRetries = "KWIN_LOAD_RETRIES";
 const char* kEnvLoadRetryDelayMs = "KWIN_LOAD_RETRY_DELAY_MS";
 const char* kEnvMaxClients = "KWIN_MAX_CLIENTS";
+const char* kEnvRxBufferCap = "KWIN_RX_BUFFER_CAP";
+const char* kEnvTxBufferCap = "KWIN_TX_BUFFER_CAP";
 const char* kEnvDebug = "KWIN_DEBUG";
+
+// Smallest non-zero buffer capacity we accept. The proto buffers only need a
+// handful of bytes (RxBuffer >= 2, TxBuffer >= 5), but a single message can be
+// up to 1 MB and anything below 64 bytes is far too small to be useful; more
+// importantly, passing a too-small capacity to proto::Client would throw
+// std::invalid_argument (uncaught -> terminate), so reject it at config time.
+constexpr size_t kMinBufferCap = 64;
 
 std::string get_env(const std::map<std::string, std::string>& env, const char* key) {
     auto it = env.find(key);
@@ -39,6 +48,31 @@ int parse_int(const std::string& value, int fallback, const std::string& name,
     } catch (const std::exception&) {
         cfg.errors.push_back(name + " must be a non-negative integer, got \"" + value + "\"");
         return fallback;
+    }
+}
+
+// Parse a buffer capacity in bytes: 0 (default) or >= kMinBufferCap.
+// Returns 0 on error (an entry is pushed to cfg.errors).
+size_t parse_buffer_cap(const std::string& value, const std::string& name, Config& cfg) {
+    if (value.empty()) {
+        return 0;
+    }
+    try {
+        size_t pos = 0;
+        long parsed = std::stol(value, &pos);
+        if (pos != value.size() || parsed < 0) {
+            cfg.errors.push_back(name + " must be a non-negative integer, got \"" + value + "\"");
+            return 0;
+        }
+        if (parsed != 0 && static_cast<size_t>(parsed) < kMinBufferCap) {
+            cfg.errors.push_back(name + " must be 0 (default) or at least " +
+                                 std::to_string(kMinBufferCap) + ", got \"" + value + "\"");
+            return 0;
+        }
+        return static_cast<size_t>(parsed);
+    } catch (const std::exception&) {
+        cfg.errors.push_back(name + " must be a non-negative integer, got \"" + value + "\"");
+        return 0;
     }
 }
 
@@ -118,6 +152,8 @@ Config load_config(const std::map<std::string, std::string>& env,
                                         cfg.load_retry_delay_ms, kEnvLoadRetryDelayMs, cfg);
     cfg.max_clients = parse_int(get_env(env, kEnvMaxClients), cfg.max_clients,
                                 kEnvMaxClients, cfg);
+    cfg.rx_buffer_cap = parse_buffer_cap(get_env(env, kEnvRxBufferCap), kEnvRxBufferCap, cfg);
+    cfg.tx_buffer_cap = parse_buffer_cap(get_env(env, kEnvTxBufferCap), kEnvTxBufferCap, cfg);
     std::string debug = get_env(env, kEnvDebug);
     cfg.debug = (debug == "1" || debug == "true" || debug == "yes");
 
