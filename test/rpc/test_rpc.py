@@ -17,7 +17,10 @@
 #   2. window caption gets the token prefix -> token.validated (window info)
 #   3. never validated within timeout -> token.invalidated reason "timeout"
 #   4. bound window closed            -> token.invalidated reason "window_closed"
-#   5. a second window shares the prefix -> token.invalidated reason "ambiguous"
+#   5. a second window shares the prefix BEFORE the validate deadline
+#      -> token.invalidated reason "ambiguous"
+#   5b. a second window shares the prefix AFTER the validate deadline
+#      -> NOT ambiguous (the token stays valid)
 #   6. another token claims the same window -> old token invalidated
 #      reason "superseded" (possibly owned by a different client)
 #   7. free rename after validation does NOT invalidate the token
@@ -59,8 +62,9 @@ SERVICE_NAME = "org.example.KwinApiServer"
 XDG_RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 SOCKET_PATH = XDG_RUNTIME / "kwin-api-server" / "service.socket"
 
-TOKEN_LENGTH = 36
-UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+# Tokens are 20-char base64 strings (doc/RPC.md §2.3).
+TOKEN_LENGTH = 20
+BASE64_TOKEN_RE = re.compile(r"^[A-Za-z0-9+/]{20}$")
 # Generous: window mapping + event delivery take a few seconds in this
 # environment (see the dev notes), so every wait must tolerate that.
 WAIT_TIMEOUT = 60.0
@@ -227,7 +231,7 @@ class RpcClient:
         result = self.request_ok("token.request", {"timeout": timeout_ms})
         token = result["token"]
         assert len(token) == TOKEN_LENGTH, f"token length {len(token)} != {TOKEN_LENGTH}"
-        assert UUID_RE.match(token), f"token not UUID-shaped: {token!r}"
+        assert BASE64_TOKEN_RE.match(token), f"token not base64({TOKEN_LENGTH}): {token!r}"
         return token
 
     def wait_notification(self, predicate, what, timeout=WAIT_TIMEOUT):
@@ -299,9 +303,9 @@ def t_basic_validation(wm):
         handle = wm.create(token)                      # title == token exactly
         validated = c.wait_token_validated(token)
         win = validated["params"]["window"]
+        # the payload carries only the caption; the client knows its own window
+        assert set(win.keys()) == {"caption"}, f"unexpected window fields: {win}"
         assert win["caption"].startswith(token), f"caption mismatch: {win}"
-        assert win["pid"] == os.getpid(), f"pid mismatch: {win}"
-        assert len(win["internalId"]) == TOKEN_LENGTH, f"bad internalId: {win}"
         # after validation the client may rename the window freely
         wm.rename(handle, "my nice title (no token prefix anymore)")
         time.sleep(5)                                  # give the server a chance
@@ -351,6 +355,27 @@ def t_ambiguous(wm):
         c.close()
 
 
+@test("deadline passed: a second window matching afterwards is NOT ambiguous")
+def t_no_ambiguity_after_deadline(wm):
+    c = RpcClient()
+    try:
+        token = c.request_token(3000)                  # short validate window
+        handle_a = wm.create(token)
+        c.wait_token_validated(token)
+        time.sleep(4)                                  # let the deadline pass
+        handle_b = wm.create(token)                    # second window, same prefix
+        time.sleep(4)                                  # give the server a chance to react
+        leftovers = c.drain_notifications()
+        assert not leftovers, \
+            f"token was withdrawn after the validate deadline: {leftovers}"
+        # the token is still valid on window A
+        wm.close(handle_a)
+        c.wait_token_invalidated(token, "window_closed")
+        wm.close(handle_b)
+    finally:
+        c.close()
+
+
 @test("superseded: another client claims the same window")
 def t_superseded_cross_client(wm):
     a = RpcClient()
@@ -364,7 +389,7 @@ def t_superseded_cross_client(wm):
         wm.rename(handle, token_b)                     # B claims A's window
         b.wait_token_validated(token_b)
         inv = a.wait_token_invalidated(token_a, "superseded")
-        assert inv["params"]["window"]["internalId"], "window missing in superseded"
+        assert "caption" in inv["params"]["window"], "window missing in superseded"
         # The window now belongs to B: closing it must notify B (not A — A's
         # token is gone).
         wm.close(handle)
@@ -439,7 +464,7 @@ def t_rpc_errors(wm):
         c.close()
 
 
-@test("tokens: every request yields the same-length UUID token")
+@test("tokens: every request yields the same-length base64 token")
 def t_token_lengths(wm):
     c = RpcClient()
     try:
@@ -496,6 +521,7 @@ def run_all_tests(wm, done):
         t_validate_timeout(wm)
         t_window_closed(wm)
         t_ambiguous(wm)
+        t_no_ambiguity_after_deadline(wm)
         t_superseded_cross_client(wm)
         t_multi_client_isolation(wm)
         t_disconnect_cleanup(wm)

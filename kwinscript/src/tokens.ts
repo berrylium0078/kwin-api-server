@@ -4,36 +4,46 @@
 // doc/RPC.md §"Window tokens").
 //
 // A client claims one of *its own* windows by proving ownership through the
-// window title: the server hands out an opaque token (a fixed-length UUID),
-// the client sets its window's title so that it starts with the token, and
-// the server — which continuously watches window create / destroy / title
-// change events — detects the prefix and answers with a "token.validated"
-// notification. From then on the client may refer to the window by the token
-// (and may freely rename it: after validation the server makes no assumptions
-// about the caption, design note in doc/RPC.md).
+// window title: the server hands out an opaque token (a fixed-length base64
+// string), the client sets its window's title so that it starts with the
+// token, and the server — which continuously watches window create / destroy
+// / title change events — detects the prefix and answers with a
+// "token.validated" notification. From then on the client may refer to the
+// window by the token (and may freely rename it: after validation the server
+// makes no assumptions about the caption, design note in doc/RPC.md).
 //
-// Matching is deliberately aggressive (validate on the first unambiguous
-// match, no round-trip polling) and may be withdrawn when a rare name
-// collision is observed:
+// Matching is deliberately aggressive (validate on the first match, no
+// round-trip polling). Each token carries its own single-shot CoarseTimer
+// armed at request time:
 //
-//   * token.validated    — exactly one window's caption starts with the token
-//   * token.invalidated  — reason "timeout"       (never validated in time)
-//                         reason "window_closed"  (the bound window closed)
-//                         reason "ambiguous"      (>= 2 windows share the prefix)
-//                         reason "superseded"     (another token claimed the
-//                                                  same window)
+//   * while the deadline timer is active, the validate window is open — a
+//     *second, different* window matching the same token makes the
+//     validation ambiguous and the token is withdrawn ("ambiguous");
+//   * when the timer fires, a still-pending token fails validation
+//     ("timeout"); for an active token the timer's inactivity simply marks
+//     the end of the validate window — later caption matches are ignored;
+//   * "window_closed" and "superseded" behave as before.
 //
 // Because every token has the same length, a caption change can be checked
-// against the token table with a single substring(0, L) lookup.
+// against the token table with a single substring(0, L) lookup — no
+// windowList scan is needed.
 
 import { z } from "zod";
 import { registerMethod, notifyClient, type RpcConnection } from "./jsonrpc";
 import { sendLog } from "./dbus";
 
-/** UUID v4: "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx". */
-const TOKEN_LENGTH = 36;
+/** Tokens are 20 chars from the base64 alphabet (120 bits of entropy). */
+const TOKEN_LENGTH = 20;
+const TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 /** Upper bound for the validate-phase timeout (per token.request). */
 const MAX_VALIDATE_TIMEOUT_MS = 3_600_000;
+/**
+ * Qt::CoarseTimer (5% accuracy) — the event loop may coalesce the deadline
+ * timers of nearby tokens into one wakeup. The Qt namespace is not exposed
+ * to KWin scripts, so use the enum value directly (kwin-ts:
+ * TimerType.CoarseTimer === 1; KWin's ScriptTimer already defaults to it).
+ */
+const COARSE_TIMER = 1 as TimerType;
 
 const TokenRequestSchema = z.object({
     // Validate-phase timeout in milliseconds: the server keeps the token
@@ -48,11 +58,18 @@ interface TokenEntry {
     /** The client that requested this token (used to route notifications). */
     conn: RpcConnection;
     state: "pending" | "active";
-    /** The bound window; non-null once validated (active). */
+    /** The matched (and once validated, bound) window; null until the first
+     * caption match. This is what the ambiguity check compares against. */
     window: KWin.Window | null;
-    /** Epoch ms by which the token must have been validated (pending only). */
-    deadline: number;
+    /** Single-shot CoarseTimer armed at request time. While it is active the
+     * validate deadline has not passed yet; after it fires, `active ===
+     * false` is the "deadline reached" marker used by the ambiguity check. */
+    deadlineTimer: QTimer;
 }
+
+const byToken = new Map<string, TokenEntry>();
+/** Active tokens keyed by windowKey(window). */
+const byWindow = new Map<string, TokenEntry>();
 
 /** Stable per-window identifier (KWin's internalId, normalized). */
 function windowKey(window: KWin.Window): string {
@@ -60,87 +77,36 @@ function windowKey(window: KWin.Window): string {
     return String(window.internalId).replace(/[{}]/g, "");
 }
 
-/** Serialize a window for notifications. */
-function windowInfo(window: KWin.Window): {
-    internalId: string;
-    pid: number;
-    caption: string;
-} {
+/** Serialize a window for notifications (caption only). */
+function windowInfo(window: KWin.Window): { caption: string } {
     return {
-        internalId: windowKey(window),
-        pid: window.pid,
         caption: window.captionNormal,
     };
 }
 
-/** A UUID-v4-shaped token (all tokens have the same length). */
+/**
+ * A random token of exactly TOKEN_LENGTH base64 characters. Duplicate tokens
+ * are skipped by rejection sampling (120 bits make collisions practically
+ * impossible, but uniqueness is guaranteed by the map lookup).
+ */
 function generateToken(): string {
-    const hex = "0123456789abcdef";
-    let token = "";
-    for (let i = 0; i < TOKEN_LENGTH; i++) {
-        switch (i) {
-            case 8:
-            case 13:
-            case 18:
-            case 23:
-                token += "-";
-                break;
-            case 14:
-                token += "4"; // version nibble
-                break;
-            default: {
-                const r = Math.floor(Math.random() * 16);
-                token += hex[i === 19 ? (r & 0x3) | 0x8 : r]; // RFC 4122 variant
-            }
+    for (;;) {
+        let token = "";
+        for (let i = 0; i < TOKEN_LENGTH; i++) {
+            token += TOKEN_ALPHABET[Math.floor(Math.random() * TOKEN_ALPHABET.length)];
         }
-    }
-    return token;
-}
-
-class TokenRegistry {
-    readonly byToken = new Map<string, TokenEntry>();
-    /** Active tokens keyed by windowKey(window). */
-    readonly byWindow = new Map<string, TokenEntry>();
-    private readonly timeoutTimer = new QTimer();
-
-    constructor() {
-        this.timeoutTimer.singleShot = true;
-        this.timeoutTimer.timeout.connect(() => this.onTimeout());
-    }
-
-    scheduleTimeout(): void {
-        let earliest = Infinity;
-        this.byToken.forEach((entry) => {
-            if (entry.state === "pending" && entry.deadline < earliest) {
-                earliest = entry.deadline;
-            }
-        });
-        if (earliest === Infinity) {
-            this.timeoutTimer.stop();
-            return;
+        if (!byToken.has(token)) {
+            return token;
         }
-        this.timeoutTimer.interval = Math.max(1, earliest - Date.now());
-        this.timeoutTimer.start();
-    }
-
-    onTimeout(): void {
-        const now = Date.now();
-        const expired: TokenEntry[] = [];
-        this.byToken.forEach((entry) => {
-            if (entry.state === "pending" && entry.deadline <= now) {
-                expired.push(entry);
-            }
-        });
-        for (const entry of expired) {
-            invalidate(entry, "timeout");
-        }
-        this.scheduleTimeout();
+        // Duplicate — resample.
     }
 }
 
-const registry = new TokenRegistry();
-
-/** Called on every caption change and on window creation. */
+/**
+ * Called on every caption change and on window creation. A caption whose
+ * first TOKEN_LENGTH characters name a known token drives the per-entry
+ * state machine (aggressive validation + pre-deadline ambiguity detection).
+ */
 function checkCaption(window: KWin.Window): void {
     const caption = window.captionNormal;
     if (caption.length < TOKEN_LENGTH) {
@@ -148,42 +114,33 @@ function checkCaption(window: KWin.Window): void {
     }
     // All tokens have the same length: the prefix is the map key.
     const prefix = caption.substring(0, TOKEN_LENGTH);
-    const entry = registry.byToken.get(prefix);
+    const entry = byToken.get(prefix);
     if (!entry) {
         return;
     }
-    recount(entry);
-}
-
-/**
- * Re-evaluate one token against the current set of windows. Aggressive
- * strategy: a single unambiguous match validates (or confirms) the token; two
- * or more matching windows make the ownership ambiguous and withdraw it.
- */
-function recount(entry: TokenEntry): void {
-    const matches = workspace.windowList().filter(
-        (w) => w.captionNormal.length >= TOKEN_LENGTH && w.captionNormal.startsWith(entry.token),
-    );
-    if (matches.length > 1) {
-        invalidate(entry, "ambiguous");
+    // Ambiguity is only defined *before the validate deadline*: once the
+    // deadline timer fired (active === false), a later caption match is
+    // ignored — the server makes no assumptions about captions after the
+    // validate window.
+    if (!entry.deadlineTimer.active) {
         return;
     }
-    if (matches.length === 0) {
-        return;
-    }
-    const window = matches[0];
-    if (entry.state === "pending") {
+    if (entry.window === null) {
+        // First match: validate immediately (aggressive strategy — the
+        // client claims its own window by title).
         validate(entry, window);
+    } else if (entry.window !== window) {
+        // A second, different window carries the same prefix before the
+        // deadline: the validation is ambiguous — withdraw the token.
+        invalidate(entry, "ambiguous");
     }
-    // active + single match: the bound window (or, after a free rename, some
-    // other window) carries the prefix — ownership is unambiguous, nothing to
-    // do (the server makes no assumptions about post-validation captions).
+    // The same window matched again: nothing to do.
 }
 
-/** Bind a pending token to its window and notify the owner. */
+/** Bind a token to its window and notify the owner. */
 function validate(entry: TokenEntry, window: KWin.Window): void {
     const key = windowKey(window);
-    const existing = registry.byWindow.get(key);
+    const existing = byWindow.get(key);
     if (existing && existing !== entry) {
         // Another token already owns this window — it is superseded (it may
         // well belong to a different client).
@@ -191,7 +148,7 @@ function validate(entry: TokenEntry, window: KWin.Window): void {
     }
     entry.state = "active";
     entry.window = window;
-    registry.byWindow.set(key, entry);
+    byWindow.set(key, entry);
     notifyClient(entry.conn, "token.validated", {
         token: entry.token,
         window: windowInfo(window),
@@ -201,11 +158,11 @@ function validate(entry: TokenEntry, window: KWin.Window): void {
 
 /** Remove a token from the registry and notify its owner with the reason. */
 function invalidate(entry: TokenEntry, reason: TokenReason): void {
+    entry.deadlineTimer.stop(); // the validate window no longer matters
     if (entry.state === "active" && entry.window) {
-        registry.byWindow.delete(windowKey(entry.window));
+        byWindow.delete(windowKey(entry.window));
     }
-    registry.byToken.delete(entry.token);
-    registry.scheduleTimeout();
+    byToken.delete(entry.token);
     notifyClient(entry.conn, "token.invalidated", {
         token: entry.token,
         reason,
@@ -214,17 +171,25 @@ function invalidate(entry: TokenEntry, reason: TokenReason): void {
     sendLog("info", `token ${entry.token} invalidated (${reason}) for client ${entry.conn.id}`);
 }
 
+/** The per-entry deadline fired. */
+function onTokenDeadline(entry: TokenEntry): void {
+    if (entry.state === "pending") {
+        // Never validated within the validate window.
+        invalidate(entry, "timeout");
+    }
+    // Active: the validate window is over. The timer going inactive is the
+    // "deadline reached" marker for the ambiguity check; nothing else to do.
+}
+
 function onWindowAdded(window: KWin.Window): void {
     // Track title changes of every managed window.
     window.captionNormalChanged.connect(() => checkCaption(window));
-    window.captionNormalChanged.connect(() => sendLog("warning",
-        `window ${window.internalId} changed caption ${window.captionNormal}`));
     // A freshly created window may already carry a token prefix.
     checkCaption(window);
 }
 
 function onWindowRemoved(window: KWin.Window): void {
-    const entry = registry.byWindow.get(windowKey(window));
+    const entry = byWindow.get(windowKey(window));
     if (entry) {
         invalidate(entry, "window_closed");
     }
@@ -233,18 +198,18 @@ function onWindowRemoved(window: KWin.Window): void {
 /** Drop every token owned by a disconnected client (no notification). */
 export function dropClientTokens(clientId: number): void {
     const removed: TokenEntry[] = [];
-    registry.byToken.forEach((entry) => {
+    byToken.forEach((entry) => {
         if (entry.conn.id === clientId) {
             removed.push(entry);
         }
     });
     for (const entry of removed) {
+        entry.deadlineTimer.stop();
         if (entry.state === "active" && entry.window) {
-            registry.byWindow.delete(windowKey(entry.window));
+            byWindow.delete(windowKey(entry.window));
         }
-        registry.byToken.delete(entry.token);
+        byToken.delete(entry.token);
     }
-    registry.scheduleTimeout();
     if (removed.length > 0) {
         sendLog("info", `client ${clientId} disconnected: dropped ${removed.length} token(s)`);
     }
@@ -263,14 +228,23 @@ function wireWindowEvents(): void {
 
 registerMethod("token.request", TokenRequestSchema, (params, conn) => {
     const token = generateToken();
-    registry.byToken.set(token, {
+    // Each token owns its deadline timer (CoarseTimer, so nearby deadlines
+    // are coalesced by Qt). It keeps running after validation: its firing is
+    // what closes the ambiguity window.
+    const deadlineTimer = new QTimer();
+    deadlineTimer.singleShot = true;
+    deadlineTimer.timerType = COARSE_TIMER;
+    deadlineTimer.interval = params.timeout;
+    const entry: TokenEntry = {
         token,
         conn,
         state: "pending",
         window: null,
-        deadline: Date.now() + params.timeout,
-    });
-    registry.scheduleTimeout();
+        deadlineTimer,
+    };
+    deadlineTimer.timeout.connect(() => onTokenDeadline(entry));
+    deadlineTimer.start();
+    byToken.set(token, entry);
     sendLog("info", `token.request from client ${conn.id}: token=${token} timeout=${params.timeout}ms`);
     return { token };
 });

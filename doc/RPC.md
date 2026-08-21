@@ -49,10 +49,14 @@ the prefix and confirms the claim.
 * **Each token is unique and owned by exactly one client; each window is bound
   to at most one token.**
 * **Low latency via aggressive matching.** Validation happens on the *first*
-  unambiguous caption match — no polling, no handshake round-trip beyond the
-  title change itself. The price is that a rare name collision (two windows
-  with the same token prefix) withdraws the claim; clients must handle
-  `token.invalidated` at any time.
+  caption match — no polling, no handshake round-trip beyond the title change
+  itself. Each token owns a single-shot **CoarseTimer** (Qt coalesces nearby
+  deadlines) that defines the validate window: while it is running, a rare
+  name collision (a second, *different* window matching the same token)
+  withdraws the claim with `token.invalidated` (`ambiguous`); once it fires,
+  a still-pending token fails validation (`timeout`) and later caption
+  matches are ignored. Clients must handle `token.invalidated` at any time
+  during the validate window.
 * After validation the client may freely rename the window (the token prefix
   is ugly); the server makes **no assumptions** about post-validation
   captions — the binding is by window identity (`internalId`), not by caption.
@@ -62,16 +66,21 @@ the prefix and confirms the claim.
 ```
  client                                server
    │  token.request {timeout}            │
-   ├──────────────────────────────────────►  token created (pending)
+   ├──────────────────────────────────────►  token created (pending);
+   │                                      │  its CoarseTimer deadline armed
    │  (client sets its window title       │
    │   to <token> + anything)             │
    │                                      │  watches window events:
-   │  ◄── notification token.validated ───┤  exactly one window's caption
-   │                                      │  starts with the token → bound
+   │  ◄── notification token.validated ───┤  first caption match → bound
+   │                                      │  (ambiguity still possible while
+   │                                      │   the deadline timer runs)
    │  (client may rename the window now;  │  (no further caption assumptions)
    │   token keeps referring to it)       │
-   │  ◄── notification token.invalidated ─┤  on window close / collision /
-   │       {reason}                       │  supersession
+   │  ◄── notification token.invalidated ─┤  on window close / supersession /
+   │       {reason}                       │  a second window matching before
+   │                                      │  the deadline (ambiguous) /
+   │                                      │  deadline without validation
+   │                                      │  (timeout)
 ```
 
 States: `pending` (created, awaiting validation) → `active` (bound to a
@@ -95,12 +104,15 @@ Request:
 Response:
 
 ```jsonc
-{ "jsonrpc": "2.0", "id": 1, "result": { "token": "a1b2c3d4-…-…-…-…" } }
+{ "jsonrpc": "2.0", "id": 1, "result": { "token": "a1b2C3d4E5f6G7h8I9jK" } }
 ```
 
-* `token` is a **UUID-v4-shaped string of exactly 36 characters** — every
-  token has the same length, which is what lets the server turn a caption
-  change into a single hash lookup (`caption.substring(0, 36)`).
+* `token` is a **20-character string over the base64 alphabet**
+  (`A–Z a–z 0–9 + /`, 120 bits of entropy), generated with `Math.random()`
+  and **rejection-sampled against the tokens in use** so duplicates are
+  skipped. Every token has the same length — this is what lets the server
+  turn a caption change into a single hash lookup
+  (`caption.substring(0, 20)`).
 * Invalid params (missing / non-integer / out-of-range `timeout`) are rejected
   with `-32602`.
 
@@ -113,17 +125,16 @@ token` or `caption.startsWith(token)`):
 ```jsonc
 { "jsonrpc": "2.0", "method": "token.validated",
   "params": {
-    "token": "a1b2c3d4-…",
+    "token": "a1b2C3d4E5f6G7h8I9jK",
     "window": {
-      "internalId": "8f5c3f2e-…",   // KWin's stable per-window UUID
-      "pid": 1234,                   // owning process
-      "caption": "a1b2c3d4-…-my-title"  // captionNormal at validation time
+      "caption": "a1b2C3d4E5f6G7h8I9jK-my-title"  // captionNormal at validation time
     }
   } }
 ```
 
 From this moment the token refers to that window (for future methods and
-event subscriptions). The caption in the payload is informational only.
+event subscriptions). The `window` payload is informational only — the client
+already knows which window it titled, so the caption confirms the match.
 
 ### 2.5 Notification: `token.invalidated`
 
@@ -133,23 +144,27 @@ Sent when the token stops being usable. `reason` is one of:
 |-----------------|-----------|
 | `"timeout"`     | the token never validated within its `timeout` window (validate failed) |
 | `"window_closed"` | the bound window was destroyed |
-| `"ambiguous"`   | at least two windows carry the token prefix (validate is ambiguous — withdrawn) |
+| `"ambiguous"`   | two *different* windows matched the token **before the validate deadline** (the validation is ambiguous — withdrawn) |
 | `"superseded"`  | another token validated against the same window; the old token is withdrawn (the old owner may be a *different* client) |
 
 ```jsonc
 { "jsonrpc": "2.0", "method": "token.invalidated",
-  "params": { "token": "a1b2c3d4-…", "reason": "window_closed",
-              "window": { … } } }      // bound window, when there is one
+  "params": { "token": "a1b2C3d4E5f6G7h8I9jK", "reason": "window_closed",
+              "window": { "caption": "…" } } }   // bound window, when there is one
 ```
 
 Semantics worth noting:
 
-* **`ambiguous`** — the aggressive strategy validates on the first single
-  match; if a *second* window later gets the same prefix (within the
-  validate-timeout window or afterwards), ownership is no longer
-  unambiguous and the claim is withdrawn. In a well-behaved session this
-  is very unlikely, e.g. another window happens to be named with the random
-  token, but clients should be prepared to handle it.
+* **`ambiguous`** — ambiguity is defined **within the validate window**: a
+  token is validated aggressively on its first caption match, and if a
+  *second, different* window matches the same token **before the validate
+  deadline** (the token's CoarseTimer is still running), ownership is no
+  longer unambiguous and the claim is withdrawn — even if validation had
+  already completed moments earlier. After the deadline has passed, later
+  caption matches are **ignored** (the server makes no assumptions about
+  post-deadline captions). In a well-behaved session this is very unlikely,
+  e.g. two windows racing to be named with the same random token, but clients
+  should be prepared to handle it.
 * **`superseded`** — a window can only be claimed once. When a (new) token
   validates against a window that already carries an active token, the old
   token is invalidated first — whoever owns it (possibly another client) gets
@@ -160,10 +175,13 @@ Semantics worth noting:
 
 ### 2.6 Window identity
 
-The script identifies windows by KWin's `internalId` (a UUID that is stable
-for the window's lifetime). The client should treat `internalId` as opaque —
-it is echoed in every notification so a client can correlate events with its
-own windows.
+Internally the script binds each active token to its window via KWin's
+`internalId` (a UUID that is stable for the window's lifetime) — that is why
+the client may freely rename the window after validation without the binding
+being affected. Notifications do **not** carry the `internalId`: the client
+already knows which of its windows it titled with the token, so the `window`
+payload only echoes the caption at the time of the event (informational; it
+may no longer start with the token after a free rename).
 
 ## 3. Implementation notes (kwinscript)
 
@@ -176,8 +194,9 @@ own windows.
   `poll()` → dispatch → `push()` the response). Only one `poll()` is pending
   per D-Bus object, as the transport requires.
 * `kwinscript/src/tokens.ts` — the token registry, the window-event wiring
-  (`windowAdded` / `windowRemoved` / `captionNormalChanged`) and the timeout
-  timer.
+  (`windowAdded` / `windowRemoved` / `captionNormalChanged`), base64 token
+  generation with rejection sampling, and one CoarseTimer deadline per token
+  (pending → `timeout`; active → end of the ambiguity window).
 * The daemon itself is **transport-only**: it forwards frames verbatim and
   never interprets JSON-RPC payloads.
 

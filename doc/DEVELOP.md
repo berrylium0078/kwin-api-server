@@ -286,10 +286,12 @@ python3 test/rpc/test_rpc.py  # afterwards (or: python3 test/rpc/test_rpc.py --b
 
 Covers every boundary case of the token protocol: basic validation (window
 info in `token.validated`), the validate-phase timeout, `window_closed`,
-`ambiguous` (two windows sharing the prefix), `superseded` (another — possibly
-different — client claims the same window), multi-client isolation, free
-renames after validation, disconnect cleanup, and the JSON-RPC error surface
-(`-32602` invalid params via zod, `-32601` unknown method).
+`ambiguous` (a second window sharing the prefix *before* the validate
+deadline — and the boundary case that a second window *after* the deadline is
+**not** ambiguous), `superseded` (another — possibly different — client
+claims the same window), multi-client isolation, free renames after
+validation, disconnect cleanup, and the JSON-RPC error surface (`-32602`
+invalid params via zod, `-32601` unknown method).
 
 The daemon is transport-only: **all** application logic lives in the KWin
 script (`kwinscript/src/jsonrpc.ts` + `clients.ts` + `tokens.ts`), so this
