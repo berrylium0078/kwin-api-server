@@ -12,7 +12,9 @@
 // control loop plus per-client message loops (src/clients.ts) and dispatches
 // client requests through the shared JSON-RPC server (src/jsonrpc.ts), where
 // feature modules register their methods with zod-validated params
-// (src/tokens.ts — the window claiming protocol).
+// (src/tokens.ts — the window claiming protocol; src/windows.ts — window
+// property update/query/watch; src/workspace.ts — workspace property
+// update/query/watch).
 //
 // Importing a module for its side effects registers methods / wires signals;
 // the control loop is started below.
@@ -21,6 +23,11 @@ import { sendLog } from "./dbus";
 import { startControlLoop } from "./clients";
 // Side effects: registers "token.request" and wires the window events.
 import "./tokens";
+// Side effects: registers "windows.update" / "windows.query" / "window.watch".
+import "./windows";
+// Side effects: registers "workspace.update" / "workspace.query" /
+// "workspace.watch".
+import "./workspace";
 
 void (async () => {
     sendLog("info", "kwinscript loaded");

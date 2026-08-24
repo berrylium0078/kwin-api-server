@@ -30,8 +30,15 @@ on top of the transport is specified in [doc/RPC.md](doc/RPC.md) and
 implemented in the KWin script (`kwinscript/src/*.ts`): the script wraps the
 D-Bus `poll()`/`push()` interface into message loops that dispatch client
 requests through a shared JSON-RPC server (json-rpc-2.0), with zod-validated
-params. The first application protocol — **window claiming via tokens** — is
-implemented (see [doc/RPC.md](doc/RPC.md) §2).
+params. Three application protocols are implemented: **window claiming via
+tokens** ([doc/RPC.md](doc/RPC.md) §2), the **window property methods**
+`windows.update` / `windows.query` / `window.watch` (§3), which take a
+claimed token as the window reference, and the **workspace property methods**
+`workspace.update` / `workspace.query` / `workspace.watch` (§4), which
+operate on the global workspace state (current desktop / activity, desktop
+and activity lists). All property methods use by-position params and treat
+requests with `id: null` as notifications (the method runs, no reply is
+sent).
 
 ## Requirements
 
@@ -168,5 +175,8 @@ gone.
   (`poll` / `push`). **Transport frozen (phase 0); implemented in
   phases 1–2.**
 * [doc/RPC.md](doc/RPC.md) — the JSON-RPC application layer: methods,
-  notifications and the window-claim token protocol. **First method
-  implemented (tokens); more planned.**
+  notifications, the window-claim token protocol, the window property
+  methods and the workspace property methods (update / query / watch,
+  by-position params, `id: null` treated as a notification). **Tokens (§2),
+  window properties (§3) and workspace properties (§4) implemented;
+  more planned.**

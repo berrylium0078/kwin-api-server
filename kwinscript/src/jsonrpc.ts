@@ -45,9 +45,16 @@ export interface RpcConnection {
 export const rpcServer = new JSONRPCServer<RpcConnection>({
     // json-rpc-2.0's default error listener is console.warn, which is not
     // reliable inside QJSEngine; route unexpected method errors to the daemon
-    // log instead (sendLog is async and never throws).
-    errorListener: (error: unknown) => {
-        void sendLog("warn", `jsonrpc: unexpected error: ${String(error)}`);
+    // log instead (sendLog is async and never throws). The library invokes
+    // the listener as (message, error) for *every* handler error, so filter
+    // out the expected JSONRPCErrorException (Invalid params, already
+    // answered to the client with a proper -32602 response) and only log
+    // genuinely unexpected ones.
+    errorListener: (message: string, error: unknown) => {
+        if (error instanceof JSONRPCErrorException) {
+            return;
+        }
+        void sendLog("warn", `jsonrpc: unexpected error: ${message} ${String(error)}`);
     },
 });
 
@@ -94,11 +101,30 @@ export function notifyClient(conn: RpcConnection, method: string, params: unknow
 /**
  * Dispatch one inbound message from a client through the shared server and
  * push the response (if any) back to that client. Notifications from the
- * client (requests without an id) yield no response.
+ * client (requests without an id) yield no response; so do requests whose
+ * `id` is `null` — the method still runs, but the reply is suppressed
+ * (doc/RPC.md §1).
  */
 export async function dispatchMessage(conn: RpcConnection, message: unknown): Promise<void> {
     const response = await rpcServer.receive(message as JSONRPCRequest | JSONRPCRequest[], conn);
-    if (response !== null && response !== undefined) {
-        conn.send(response);
+    if (response === null || response === undefined) {
+        return;
     }
+    if (Array.isArray(response)) {
+        // A batch may mix ordinary requests with id-null ones: drop every
+        // element that echoes a null id, then send the rest (single object
+        // for one reply, array for several — same shape convention as
+        // json-rpc-2.0's receiveMultiple).
+        const kept = response.filter((entry) => entry.id !== null);
+        if (kept.length === 1) {
+            conn.send(kept[0]);
+        } else if (kept.length > 1) {
+            conn.send(kept);
+        }
+        return;
+    }
+    if ((response as { id?: unknown }).id === null) {
+        return; // the request carried id: null — notification-style, no reply
+    }
+    conn.send(response);
 }

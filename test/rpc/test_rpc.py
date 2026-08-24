@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 #
-# test/rpc/test_rpc.py — end-to-end test of the JSON-RPC window-claim token
-# protocol (doc/RPC.md §2) in a REAL systemd + KDE (KWin) desktop session.
+# test/rpc/test_rpc.py — end-to-end test of the JSON-RPC application layer
+# (doc/RPC.md): the window-claim token protocol (§2) and the window property
+# methods windows.update / windows.query / window.watch (§3) in a REAL systemd
+# + KDE (KWin) desktop session.
 #
 # It starts the real service through run.py (`./run.py --no-follow`, the
 # systemd user unit kwin-api-server.service), then:
@@ -13,7 +15,7 @@
 #     client, driving the token protocol through its actual window events.
 #
 # Covered boundary cases (doc/RPC.md §2):
-#   1. token.request -> token (fixed 36-char UUID length)
+#   1. token.request -> token (20-char base64 string)
 #   2. window caption gets the token prefix -> token.validated (window info)
 #   3. never validated within timeout -> token.invalidated reason "timeout"
 #   4. bound window closed            -> token.invalidated reason "window_closed"
@@ -28,6 +30,38 @@
 #   9. disconnect cleanup: a disconnected client's tokens are dropped, so a
 #      later claim of the same window is clean
 #  10. invalid params -> -32602; unknown method -> -32601
+#
+# And the window-property methods (doc/RPC.md §3), which use by-position
+# params ([token, ...]) and treat requests with id null as notifications:
+#  11. windows.update / windows.query round-trip on real properties
+#      (opacity / onAllDesktops / skipTaskbar / skipPager / keepAbove),
+#      query deduplication, void update result (null)
+#  12. unsupported property -> -32602, atomically (nothing applied)
+#  13. window.watch: enable -> window.changed on change; disable -> silence;
+#      per-property listener state in the result
+#  14. watch idempotency: a double watch keeps exactly one listener (a single
+#      change emits exactly one window.changed)
+#  15. watch teardown when the token is superseded: the old owner stops
+#      receiving window.changed
+#  16. id null: the method runs but no reply is sent
+#  17. token resolution errors: unknown / foreign / not-yet-validated token
+#      -> -32602
+#  18. by-position params of the wrong shape (object instead of array,
+#      missing elements, non-boolean watch values) -> -32602
+#  19. desktops / activities as ID sets (string[]): query wire format,
+#      round-trip update, unknown-ID and non-array values -> -32602,
+#      atomically
+#  20. watching desktops: a desktop change emits window.changed carrying the
+#      new ID set (including the [] <-> [desktop] flip)
+#
+# And the workspace property methods (doc/RPC.md §4), which take no token:
+#  21. workspace.query: current desktop/activity and the full desktop/activity
+#      ID lists, deduplication
+#  22. workspace.update: switching currentActivity / currentDesktop (verified
+#      and restored), unknown-ID and non-string values -> -32602, desktops /
+#      activities read-only at the workspace level
+#  23. workspace.watch: currentActivity / currentDesktop changes emit
+#      workspace.changed with the new ID; idempotent, unwatch silences
 #
 # Requirements: a running systemd user manager, a session bus and the real
 # KWin of a Plasma session (org.kde.KWin must be owned), plus PyQt6. The
@@ -261,6 +295,41 @@ class RpcClient:
             and n.get("params", {}).get("reason") == reason,
             f"token.invalidated({token}, {reason})", timeout)
 
+    def wait_window_changed(self, token, prop, value=None, timeout=WAIT_TIMEOUT):
+        """Wait for a window.changed notification (doc/RPC.md §3.4). The value
+        is compared with == so that list values (desktops/activities ID sets)
+        match too; boolean values are JSON booleans, never 0/1."""
+        return self.wait_notification(
+            lambda n: n.get("method") == "window.changed"
+            and n.get("params", {}).get("token") == token
+            and n.get("params", {}).get("property") == prop
+            and (value is None or n.get("params", {}).get("value") == value),
+            f"window.changed({token}, {prop})", timeout)
+
+    def wait_workspace_changed(self, prop, value=None, timeout=WAIT_TIMEOUT):
+        """Wait for a workspace.changed notification (doc/RPC.md §4.4)."""
+        return self.wait_notification(
+            lambda n: n.get("method") == "workspace.changed"
+            and n.get("params", {}).get("property") == prop
+            and (value is None or n.get("params", {}).get("value") == value),
+            f"workspace.changed({prop})", timeout)
+
+    def send_expect_no_reply(self, method, params, wait=4.0):
+        """Send a request with id null (notification-style, doc/RPC.md §1):
+        the method must run, but the server must not send a reply. A reply to
+        an id-null request would be collected under the None response key."""
+        body = {"jsonrpc": "2.0", "id": None, "method": method, "params": params}
+        with self._send_lock:
+            self.sock.sendall(frame(json.dumps(body).encode("utf-8")))
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            with self._cond:
+                if None in self._responses:
+                    raise AssertionError(
+                        f"server replied to the id-null request {method}: "
+                        f"{self._responses[None]}")
+            time.sleep(0.05)
+
     def drain_notifications(self):
         with self._cond:
             out = self._notifications
@@ -476,6 +545,482 @@ def t_token_lengths(wm):
 
 
 # ---------------------------------------------------------------------------
+# window property methods (doc/RPC.md §3)
+# ---------------------------------------------------------------------------
+
+def _claim_window(wm, c):
+    """Create a window titled with a fresh token and wait for validation."""
+    token = c.request_token(60000)
+    handle = wm.create(token)
+    c.wait_token_validated(token)
+    return token, handle
+
+
+@test("update/query: round-trip on real properties, dedupe, void update")
+def t_update_query_roundtrip(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        # by-position params: [token, updateInfo]
+        assert c.request_ok("windows.update", [token, {
+            "onAllDesktops": True, "skipTaskbar": True, "opacity": 0.5,
+        }]) is None, "windows.update must return null (void)"
+        # duplicate names are deduplicated; the result carries each once
+        result = c.request_ok("windows.query", [token, [
+            "onAllDesktops", "opacity", "onAllDesktops", "skipTaskbar",
+            "skipTaskbar", "opacity",
+        ]])
+        assert set(result.keys()) == {"onAllDesktops", "opacity", "skipTaskbar"}, result
+        assert result["onAllDesktops"] is True, result
+        assert result["skipTaskbar"] is True, result
+        assert abs(result["opacity"] - 0.5) < 1e-9, result
+        # empty update / empty query are both valid
+        assert c.request_ok("windows.update", [token, {}]) is None
+        assert c.request_ok("windows.query", [token, []]) == {}
+        # a second update is observable: the values really changed
+        c.request_ok("windows.update", [token, {
+            "onAllDesktops": False, "opacity": 1.0,
+        }])
+        result = c.request_ok("windows.query", [token, ["onAllDesktops", "opacity"]])
+        assert result["onAllDesktops"] is False, result
+        assert abs(result["opacity"] - 1.0) < 1e-9, result
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("update: unsupported property -> -32602, nothing applied (atomic)")
+def t_update_unsupported(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        err = c.request_error("windows.update", [token, {"bogus": 1}], -32602)
+        assert "unsupported property" in err["message"], err
+        # a mixed call must fail as a whole: the supported part is not applied
+        c.request_ok("windows.update", [token, {"onAllDesktops": True}])
+        err = c.request_error("windows.update", [token, {"onAllDesktops": False, "bogus": 1}], -32602)
+        assert "unsupported property" in err["message"], err
+        result = c.request_ok("windows.query", [token, ["onAllDesktops"]])
+        assert result == {"onAllDesktops": True}, \
+            f"failed update leaked a partial apply: {result}"
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("query: unsupported property -> -32602")
+def t_query_unsupported(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        err = c.request_error("windows.query", [token, ["opacity", "bogus"]], -32602)
+        assert "unsupported property" in err["message"], err
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: enable -> window.changed on change; disable -> silence")
+def t_watch_enable_disable(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        # skipTaskbar starts false; watch it
+        assert c.request_ok("window.watch", [token, {"skipTaskbar": True}]) == \
+            {"skipTaskbar": True}
+        # a real change (via windows.update) fires the watched signal
+        c.request_ok("windows.update", [token, {"skipTaskbar": True}])
+        n = c.wait_window_changed(token, "skipTaskbar", value=True)
+        assert n["params"]["token"] == token, n
+        # unwatch: the result says there is no listener any more
+        assert c.request_ok("window.watch", [token, {"skipTaskbar": False}]) == \
+            {"skipTaskbar": False}
+        # another change is now silent
+        c.request_ok("windows.update", [token, {"skipTaskbar": False}])
+        time.sleep(4)
+        leftovers = c.drain_notifications()
+        assert not leftovers, f"notifications after unwatch: {leftovers}"
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: idempotent — a double watch keeps a single listener")
+def t_watch_idempotent(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        assert c.request_ok("window.watch", [token, {"keepAbove": True}]) == \
+            {"keepAbove": True}
+        assert c.request_ok("window.watch", [token, {"keepAbove": True}]) == \
+            {"keepAbove": True}
+        # one change must emit exactly one window.changed (no double connect)
+        c.request_ok("windows.update", [token, {"keepAbove": True}])
+        c.wait_window_changed(token, "keepAbove", value=True)
+        time.sleep(4)
+        leftovers = c.drain_notifications()
+        assert not leftovers, \
+            f"double watch produced duplicate notifications: {leftovers}"
+        # unwatching an unwatched property is a no-op (still false)
+        assert c.request_ok("window.watch", [token, {"keepAbove": False}]) == \
+            {"keepAbove": False}
+        assert c.request_ok("window.watch", [token, {"keepAbove": False}]) == \
+            {"keepAbove": False}
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: multiple properties, per-property listener state in the result")
+def t_watch_multi(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        result = c.request_ok("window.watch", [token, {
+            "skipTaskbar": True, "skipPager": True, "keepAbove": False,
+        }])
+        assert result == {"skipTaskbar": True, "skipPager": True, "keepAbove": False}, result
+        # each watched property fires its own notification
+        c.request_ok("windows.update", [token, {"skipTaskbar": True, "skipPager": True}])
+        c.wait_window_changed(token, "skipTaskbar", value=True)
+        c.wait_window_changed(token, "skipPager", value=True)
+        # unwatch everything; keepAbove was never watched
+        result = c.request_ok("window.watch", [token, {
+            "skipTaskbar": False, "skipPager": False, "keepAbove": False,
+        }])
+        assert result == {"skipTaskbar": False, "skipPager": False, "keepAbove": False}, result
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: unsupported properties / non-boolean values -> -32602")
+def t_watch_unsupported(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        # opacity is a number, not a boolean property
+        err = c.request_error("window.watch", [token, {"opacity": True}], -32602)
+        assert "unsupported property" in err["message"], err
+        # onAllDesktops / noBorder have no <prop>Changed signal
+        err = c.request_error("window.watch", [token, {"onAllDesktops": True}], -32602)
+        assert "unsupported property" in err["message"], err
+        err = c.request_error("window.watch", [token, {"noBorder": True}], -32602)
+        assert "unsupported property" in err["message"], err
+        # unknown property
+        err = c.request_error("window.watch", [token, {"bogus": True}], -32602)
+        assert "unsupported property" in err["message"], err
+        # non-boolean value (rejected by the params schema)
+        err = c.request_error("window.watch", [token, {"skipTaskbar": "yes"}], -32602)
+        assert "invalid params" in err["message"], err
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: listeners are torn down when the token is superseded")
+def t_watch_superseded_cleanup(wm):
+    a = RpcClient()
+    b = RpcClient()
+    try:
+        token_a = a.request_token(60000)
+        handle = wm.create(token_a)
+        a.wait_token_validated(token_a)
+        # A watches skipTaskbar (starts false)
+        assert a.request_ok("window.watch", [token_a, {"skipTaskbar": True}]) == \
+            {"skipTaskbar": True}
+        # B claims the same window: A's token — and its watch — is torn down
+        token_b = b.request_token(60000)
+        wm.rename(handle, token_b)
+        b.wait_token_validated(token_b)
+        a.wait_token_invalidated(token_a, "superseded")
+        # B watches the same property and changes it: only B hears about it
+        assert b.request_ok("window.watch", [token_b, {"skipTaskbar": True}]) == \
+            {"skipTaskbar": True}
+        b.request_ok("windows.update", [token_b, {"skipTaskbar": True}])
+        b.wait_window_changed(token_b, "skipTaskbar", value=True)
+        time.sleep(4)
+        leftovers_a = a.drain_notifications()
+        assert not leftovers_a, \
+            f"A kept receiving window.changed after supersession: {leftovers_a}"
+        wm.close(handle)
+        b.wait_token_invalidated(token_b, "window_closed")
+    finally:
+        a.close()
+        b.close()
+
+
+@test("id null: the method runs but no reply is sent")
+def t_id_null_no_reply(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        # notification-style update: no reply, but the update still applies
+        c.send_expect_no_reply("windows.update", [token, {"skipTaskbar": True}])
+        result = c.request_ok("windows.query", [token, ["skipTaskbar"]])
+        assert result == {"skipTaskbar": True}, result
+        # the same holds for window.watch (id null, no reply, listener set)
+        c.send_expect_no_reply("window.watch", [token, {"skipPager": True}])
+        c.request_ok("windows.update", [token, {"skipPager": True}])
+        c.wait_window_changed(token, "skipPager", value=True)
+        # and an ordinary request still gets a reply (sanity)
+        result = c.request_ok("windows.query", [token, ["skipTaskbar"]])
+        assert result == {"skipTaskbar": True}, result
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("token resolution: unknown / foreign / pending token -> -32602")
+def t_token_resolution_errors(wm):
+    a = RpcClient()
+    b = RpcClient()
+    try:
+        # unknown token
+        err = a.request_error("windows.update", ["no-such-token", {}], -32602)
+        assert "unknown token" in err["message"], err
+        # a token that was requested but never validated has no window yet
+        token_pending = a.request_token(60000)
+        err = a.request_error("windows.query", [token_pending, ["opacity"]], -32602)
+        assert "not bound" in err["message"], err
+        # a token owned by another client must not grant control
+        token_a = a.request_token(60000)
+        handle = wm.create(token_a)
+        a.wait_token_validated(token_a)
+        err = b.request_error("windows.query", [token_a, ["opacity"]], -32602)
+        assert "another client" in err["message"], err
+        wm.close(handle)
+        a.wait_token_invalidated(token_a, "window_closed")
+    finally:
+        a.close()
+        b.close()
+
+
+@test("by-position params: wrong shape -> -32602")
+def t_by_position_params(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        # params must be an array [token, updateInfo], not an object
+        err = c.request_error("windows.update",
+                              {"token": token, "updateInfo": {}}, -32602)
+        assert "invalid params" in err["message"], err
+        # missing the updateInfo element
+        err = c.request_error("windows.update", [token], -32602)
+        assert "invalid params" in err["message"], err
+        # token must be a string
+        err = c.request_error("windows.update", [123, {}], -32602)
+        assert "invalid params" in err["message"], err
+        # queryInfo must be an array of strings
+        err = c.request_error("windows.query", [token, "opacity"], -32602)
+        assert "invalid params" in err["message"], err
+        # watch values must be booleans
+        err = c.request_error("window.watch", [token, {"skipTaskbar": 1}], -32602)
+        assert "invalid params" in err["message"], err
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("desktops/activities: ID wire format, round-trip, unknown-ID rejection")
+def t_desktops_activities_ids(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        result = c.request_ok("windows.query", [token, ["desktops", "activities"]])
+        # wire format: string[] of IDs (KDE UUIDs); empty means "all"
+        for prop in ("desktops", "activities"):
+            assert isinstance(result[prop], list), result
+            assert all(isinstance(x, str) and x for x in result[prop]), result
+        # round-trip: the queried IDs are in the workspace catalogs by
+        # construction, so setting them back must succeed
+        c.request_ok("windows.update", [token, {
+            "desktops": result["desktops"], "activities": result["activities"],
+        }])
+        again = c.request_ok("windows.query", [token, ["desktops", "activities"]])
+        assert again == result, f"desktops/activities round-trip mismatch: {result} -> {again}"
+        # unknown IDs are rejected with -32602, atomically (nothing changes)
+        err = c.request_error("windows.update", [token, {
+            "desktops": ["00000000-0000-0000-0000-000000000000"],
+        }], -32602)
+        assert "unknown desktop" in err["message"], err
+        err = c.request_error("windows.update", [token, {
+            "activities": ["00000000-0000-0000-0000-000000000000"],
+        }], -32602)
+        assert "unknown activity" in err["message"], err
+        # non-array values are rejected too
+        err = c.request_error("windows.update", [token, {
+            "desktops": "00000000-0000-0000-0000-000000000000",
+        }], -32602)
+        assert "invalid params" in err["message"], err
+        still = c.request_ok("windows.query", [token, ["desktops", "activities"]])
+        assert still == result, f"rejected update changed the window: {result} -> {still}"
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+@test("watch: desktops changes emit window.changed with the new ID set")
+def t_watch_desktops(wm):
+    c = RpcClient()
+    try:
+        token, handle = _claim_window(wm, c)
+        initial = c.request_ok("windows.query", [token, ["desktops"]])["desktops"]
+        assert isinstance(initial, list) and all(isinstance(x, str) for x in initial)
+        assert c.request_ok("window.watch", [token, {"desktops": True}]) == \
+            {"desktops": True}
+        if initial:
+            # flip to all desktops: the notification carries the new ID set ([])
+            c.request_ok("windows.update", [token, {"desktops": []}])
+            n = c.wait_window_changed(token, "desktops", value=[])
+            assert n["params"]["value"] == [], n
+            # and back to the original desktop(s)
+            c.request_ok("windows.update", [token, {"desktops": initial}])
+            n = c.wait_window_changed(token, "desktops", value=initial)
+            assert n["params"]["value"] == initial, n
+        else:
+            # the window was already on all desktops; without a known desktop
+            # ID there is nothing to flip to — just make sure watching itself
+            # stays quiet until the window is closed
+            time.sleep(3)
+            leftovers = c.drain_notifications()
+            assert not leftovers, leftovers
+        assert c.request_ok("window.watch", [token, {"desktops": False}]) == \
+            {"desktops": False}
+        wm.close(handle)
+        c.wait_token_invalidated(token, "window_closed")
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# workspace property methods (doc/RPC.md §4)
+# ---------------------------------------------------------------------------
+
+@test("workspace: query current desktop/activity and the ID lists")
+def t_workspace_query(wm):
+    c = RpcClient()
+    try:
+        # by-position params: [queryInfo]; duplicates are deduplicated
+        result = c.request_ok("workspace.query", [[
+            "currentDesktop", "currentActivity", "desktops", "activities",
+            "currentDesktop",
+        ]])
+        assert set(result.keys()) == \
+            {"currentDesktop", "currentActivity", "desktops", "activities"}, result
+        # current values are IDs present in the respective lists
+        assert result["currentDesktop"] in result["desktops"], result
+        assert result["currentActivity"] in result["activities"], result
+        for prop in ("desktops", "activities"):
+            assert isinstance(result[prop], list), result
+            assert all(isinstance(x, str) and x for x in result[prop]), result
+        # empty query -> {}
+        assert c.request_ok("workspace.query", [[]]) == {}
+        # unsupported property -> -32602
+        err = c.request_error("workspace.query", [["bogus"]], -32602)
+        assert "unsupported property" in err["message"], err
+    finally:
+        c.close()
+
+
+@test("workspace: update currentActivity / currentDesktop, unknown-ID rejection")
+def t_workspace_update(wm):
+    c = RpcClient()
+    try:
+        cur = c.request_ok("workspace.query", [["currentActivity", "currentDesktop"]])
+        lists = c.request_ok("workspace.query", [["activities", "desktops"]])
+        other_activity = next(
+            (a for a in lists["activities"] if a != cur["currentActivity"]), None)
+        other_desktop = next(
+            (d for d in lists["desktops"] if d != cur["currentDesktop"]), None)
+
+        # switch to another known activity/desktop, verify, restore
+        if other_activity:
+            assert c.request_ok("workspace.update", [{"currentActivity": other_activity}]) is None
+            assert c.request_ok("workspace.query", [["currentActivity"]]) == \
+                {"currentActivity": other_activity}
+            c.request_ok("workspace.update", [{"currentActivity": cur["currentActivity"]}])
+        if other_desktop:
+            assert c.request_ok("workspace.update", [{"currentDesktop": other_desktop}]) is None
+            assert c.request_ok("workspace.query", [["currentDesktop"]]) == \
+                {"currentDesktop": other_desktop}
+            c.request_ok("workspace.update", [{"currentDesktop": cur["currentDesktop"]}])
+
+        # unknown IDs -> -32602
+        err = c.request_error("workspace.update", [{
+            "currentDesktop": "00000000-0000-0000-0000-000000000000",
+        }], -32602)
+        assert "unknown desktop" in err["message"], err
+        err = c.request_error("workspace.update", [{
+            "currentActivity": "00000000-0000-0000-0000-000000000000",
+        }], -32602)
+        assert "unknown activity" in err["message"], err
+        # non-string value -> -32602
+        err = c.request_error("workspace.update", [{"currentDesktop": 123}], -32602)
+        assert "invalid params" in err["message"], err
+        # desktops/activities are read-only at the workspace level
+        for prop in ("desktops", "activities"):
+            err = c.request_error("workspace.update", [{prop: []}], -32602)
+            assert "unsupported property" in err["message"], err
+    finally:
+        c.close()
+
+
+@test("workspace: watch currentActivity/currentDesktop -> workspace.changed")
+def t_workspace_watch(wm):
+    c = RpcClient()
+    try:
+        cur = c.request_ok("workspace.query", [["currentActivity", "currentDesktop"]])
+        lists = c.request_ok("workspace.query", [["activities", "desktops"]])
+        other_activity = next(
+            (a for a in lists["activities"] if a != cur["currentActivity"]), None)
+        other_desktop = next(
+            (d for d in lists["desktops"] if d != cur["currentDesktop"]), None)
+
+        # currentActivity: watch, switch, hear it, unwatch, restore silently
+        assert c.request_ok("workspace.watch", [{"currentActivity": True}]) == \
+            {"currentActivity": True}
+        assert c.request_ok("workspace.watch", [{"currentActivity": True}]) == \
+            {"currentActivity": True}   # idempotent: still one listener
+        if other_activity:
+            c.request_ok("workspace.update", [{"currentActivity": other_activity}])
+            n = c.wait_workspace_changed("currentActivity", value=other_activity)
+            assert n["params"]["value"] == other_activity, n
+        assert c.request_ok("workspace.watch", [{"currentActivity": False}]) == \
+            {"currentActivity": False}
+        c.request_ok("workspace.update", [{"currentActivity": cur["currentActivity"]}])
+        time.sleep(3)
+        leftovers = c.drain_notifications()
+        assert not leftovers, f"workspace.changed after unwatch: {leftovers}"
+
+        # currentDesktop: same dance
+        assert c.request_ok("workspace.watch", [{"currentDesktop": True}]) == \
+            {"currentDesktop": True}
+        if other_desktop:
+            c.request_ok("workspace.update", [{"currentDesktop": other_desktop}])
+            n = c.wait_workspace_changed("currentDesktop", value=other_desktop)
+            assert n["params"]["value"] == other_desktop, n
+        assert c.request_ok("workspace.watch", [{"currentDesktop": False}]) == \
+            {"currentDesktop": False}
+        c.request_ok("workspace.update", [{"currentDesktop": cur["currentDesktop"]}])
+        time.sleep(3)
+        leftovers = c.drain_notifications()
+        assert not leftovers, f"workspace.changed after unwatch: {leftovers}"
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
 # harness: Qt main loop + worker thread + service lifecycle
 # ---------------------------------------------------------------------------
 
@@ -527,6 +1072,24 @@ def run_all_tests(wm, done):
         t_disconnect_cleanup(wm)
         t_rpc_errors(wm)
         t_token_lengths(wm)
+        # window property methods (doc/RPC.md §3)
+        t_update_query_roundtrip(wm)
+        t_update_unsupported(wm)
+        t_query_unsupported(wm)
+        t_watch_enable_disable(wm)
+        t_watch_idempotent(wm)
+        t_watch_multi(wm)
+        t_watch_unsupported(wm)
+        t_watch_superseded_cleanup(wm)
+        t_id_null_no_reply(wm)
+        t_token_resolution_errors(wm)
+        t_by_position_params(wm)
+        t_desktops_activities_ids(wm)
+        t_watch_desktops(wm)
+        # workspace property methods (doc/RPC.md §4)
+        t_workspace_query(wm)
+        t_workspace_update(wm)
+        t_workspace_watch(wm)
         print("[worker] all tests done", flush=True)
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -566,7 +1129,7 @@ def main():
         die(f"startup failed: {e}")
 
     print("=" * 72)
-    print(f"test/rpc: window-claim token protocol (unit {UNIT_NAME})")
+    print(f"test/rpc: JSON-RPC application layer (unit {UNIT_NAME})")
     print("=" * 72)
 
     done = threading.Event()

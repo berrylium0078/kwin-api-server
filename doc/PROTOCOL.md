@@ -22,8 +22,9 @@
 >   legacy line protocol (`SocketServer`) is superseded.
 >
 > The *application* layer (what the JSON payloads mean, the JSONRPC method
-> list) is specified separately in [RPC.md](RPC.md); the first protocol
-> (window claiming via tokens) is implemented.
+> list) is specified separately in [RPC.md](RPC.md); the token protocol
+> (window claiming), the window property methods and the workspace property
+> methods are implemented there.
 
 ## 1. Overview and layering
 

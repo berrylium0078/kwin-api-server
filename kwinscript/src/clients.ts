@@ -16,6 +16,7 @@
 import { pollClient, pollDaemon, pushToClient, sendLog, sleep, DBUS_RETRY_DELAY } from "./dbus";
 import { dispatchMessage, type RpcConnection } from "./jsonrpc";
 import { dropClientTokens } from "./tokens";
+import { dropClientWorkspaceWatches } from "./workspace";
 
 /** One connected client: inbound poll loop + outbound push. */
 class ClientConnection implements RpcConnection {
@@ -103,6 +104,8 @@ function onClientDisconnected(id: number): void {
     // All tokens owned by the disconnected client are dropped (its window
     // bindings become free again); no notification can be delivered anymore.
     dropClientTokens(id);
+    // Same for its workspace-property listeners (workspace.changed).
+    dropClientWorkspaceWatches(id);
     sendLog("info", `rpc: client ${id} disconnected`);
 }
 

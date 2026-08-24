@@ -29,8 +29,10 @@
 // windowList scan is needed.
 
 import { z } from "zod";
+import { JSONRPCErrorCode, JSONRPCErrorException } from "json-rpc-2.0";
 import { registerMethod, notifyClient, type RpcConnection } from "./jsonrpc";
 import { sendLog } from "./dbus";
+import { dropClientWatches } from "./windows";
 
 /** Tokens are 20 chars from the base64 alphabet (120 bits of entropy). */
 const TOKEN_LENGTH = 20;
@@ -163,6 +165,10 @@ function invalidate(entry: TokenEntry, reason: TokenReason): void {
         byWindow.delete(windowKey(entry.window));
     }
     byToken.delete(entry.token);
+    // Any property listeners the owner set up through this token (window.watch)
+    // are torn down: the client no longer owns the window, so it must not keep
+    // receiving window.changed notifications for it.
+    dropClientWatches([entry.token]);
     notifyClient(entry.conn, "token.invalidated", {
         token: entry.token,
         reason,
@@ -210,9 +216,43 @@ export function dropClientTokens(clientId: number): void {
         }
         byToken.delete(entry.token);
     }
+    // Same for the property listeners of those tokens.
+    dropClientWatches(removed.map((entry) => entry.token));
     if (removed.length > 0) {
         sendLog("info", `client ${clientId} disconnected: dropped ${removed.length} token(s)`);
     }
+}
+
+/**
+ * Resolve a client's token to the window it is bound to, or throw -32602.
+ *
+ * This is the shared entry point for every token-referencing method
+ * (windows.update / windows.query / window.watch, and future ones). A token
+ * must exist, belong to the calling client (the token is the ownership
+ * proof — another client knowing the token must not control the window) and
+ * be in the `active` state (pending tokens have no window yet).
+ */
+export function resolveTokenWindow(token: string, conn: RpcConnection): KWin.Window {
+    const entry = byToken.get(token);
+    if (!entry) {
+        throw new JSONRPCErrorException(
+            `invalid params: unknown token "${token}"`,
+            JSONRPCErrorCode.InvalidParams,
+        );
+    }
+    if (entry.conn !== conn) {
+        throw new JSONRPCErrorException(
+            `invalid params: token "${token}" belongs to another client`,
+            JSONRPCErrorCode.InvalidParams,
+        );
+    }
+    if (entry.state !== "active" || entry.window === null) {
+        throw new JSONRPCErrorException(
+            `invalid params: token "${token}" is not bound to a window`,
+            JSONRPCErrorCode.InvalidParams,
+        );
+    }
+    return entry.window;
 }
 
 function wireWindowEvents(): void {

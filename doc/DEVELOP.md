@@ -68,7 +68,24 @@ kwinscript/
                          per client (/cli{id} poll -> dispatch -> push)
     tokens.ts            the window-claim token protocol (doc/RPC.md §2):
                          token registry, window-event wiring, validation
-                         state machine, timeout timers
+                         state machine, timeout timers; also the shared
+                         resolveTokenWindow() used by token-referencing
+                         methods
+    windows.ts           window property methods (doc/RPC.md §3):
+                         windows.update / windows.query / window.watch with
+                         by-position params, the three immutable
+                         supported-property Sets, the per-token watch
+                         registry and the window.changed notification;
+                         also the workspace desktop/activity ID catalogs
+                         (desktopsChanged rescan, activityAdded/Removed
+                         incremental updates) used to validate
+                         desktops/activities update values
+    workspace.ts         workspace property methods (doc/RPC.md §4):
+                         workspace.update / workspace.query / workspace.watch
+                         for currentDesktop / currentActivity / desktops /
+                         activities, the per-client watch registry and the
+                         workspace.changed notification; ID values validated
+                         against the catalogs from windows.ts
   kwin-ts/               KWin scripting API TS declarations (ambient package,
                          wired into the typecheck via tsconfig.json typeRoots)
   tsconfig.json / package.json / esbuild.build.mjs
@@ -77,15 +94,17 @@ test/
   unit/                    C++ unit tests (kwin-api-test, `xmake test`)
   daemon/                  Python end-to-end test against the real systemd
                            user service (mock service unit + test_daemon.py)
-  rpc/                     Python end-to-end test of the JSON-RPC window-claim
-                           protocol (test_rpc.py): real service via run.py +
-                           real PyQt6 windows in a Plasma session
+  rpc/                     Python end-to-end test of the JSON-RPC application
+                           layer (test_rpc.py): the token protocol and the
+                           window + workspace property methods — real service
+                           via run.py + real PyQt6 windows in a Plasma session
 doc/
   DEVELOP.md               this document
   PROTOCOL.md              communication protocol — transport layer frozen
                            (phase 0), implemented
-  RPC.md                   JSON-RPC application layer — window-claim token
-                           protocol implemented, more methods planned
+  RPC.md                   JSON-RPC application layer — tokens, window
+                           properties and workspace properties implemented,
+                           more planned
 build/                     xmake build directory (and build.ninja)
 ```
 
@@ -270,10 +289,11 @@ the log() surface. On exit the service is stopped and the user is reminded to
 remove the `systemctl --user link` (`~/.config/systemd/user/
 kwin-api-server-test.service`).
 
-### JSON-RPC window-claim test — `test/rpc/test_rpc.py`
+### JSON-RPC e2e test — `test/rpc/test_rpc.py`
 
-A Python end-to-end test of the **application layer** (doc/RPC.md §2) against
-the **real service** in a real Plasma session. It starts `kwin-api-server.service`
+A Python end-to-end test of the **application layer** (doc/RPC.md §2–§4)
+against the **real service** in a real Plasma session. It starts
+`kwin-api-server.service`
 through run.py (`./run.py --no-follow`, optionally `--build`), then plays
 several JSON-RPC clients over the unix socket and creates / renames / closes
 **real windows with PyQt6** to drive the token protocol through its actual
@@ -291,10 +311,23 @@ deadline — and the boundary case that a second window *after* the deadline is
 **not** ambiguous), `superseded` (another — possibly different — client
 claims the same window), multi-client isolation, free renames after
 validation, disconnect cleanup, and the JSON-RPC error surface (`-32602`
-invalid params via zod, `-32601` unknown method).
+invalid params via zod, `-32601` unknown method). On top of that it exercises
+the window-property methods of §3: update/query round-trips (including
+deduplication and the atomic "no partial apply" behavior on unsupported
+properties), watch enable/disable with `window.changed` notifications
+(including idempotency — a double watch does not double-notify), watch
+cleanup when a token is superseded by another client, by-position params,
+id-`null` requests (the method runs, no reply is sent), the token
+resolution errors (unknown / foreign / not-yet-validated token) and the
+`desktops` / `activities` ID-set wire format. And the workspace-property
+methods of §4: querying the current desktop / activity and the full desktop /
+activity ID lists, updating `currentDesktop` / `currentActivity` (with
+unknown-ID rejection and restore), and `workspace.changed` notifications for
+watched workspace properties.
 
 The daemon is transport-only: **all** application logic lives in the KWin
-script (`kwinscript/src/jsonrpc.ts` + `clients.ts` + `tokens.ts`), so this
+script (`kwinscript/src/jsonrpc.ts` + `clients.ts` + `tokens.ts` +
+`windows.ts` + `workspace.ts`), so this
 test runs against the real daemon with the real bundle.
 
 ## Notes / troubleshooting
