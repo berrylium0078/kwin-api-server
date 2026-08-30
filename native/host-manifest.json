@@ -1,0 +1,7 @@
+{
+  "name": "org.plasma_tweak.kwin_api",
+  "description": "Bridge between the Plasma Tweak Firefox extension and kwin-api-server (KWin scripting exposed as JSON-RPC over a unix socket)",
+  "path": "@HOST_PATH@",
+  "type": "stdio",
+  "allowed_extensions": ["kwin-window-manager@plasma-tweak.local"]
+}

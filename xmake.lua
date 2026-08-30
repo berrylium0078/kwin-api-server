@@ -199,3 +199,75 @@ target("kwin-api-test")
     add_syslinks("systemd")
     add_tests("unit", {pass_outputs = ".*ALL TESTS PASSED.*"})
     on_install(function() end)
+
+-- ---------------------------------------------------------------------------
+-- kwin-api-native: the Firefox native messaging host (native/).
+--
+-- Installs the host script and the rendered native messaging manifest:
+--   <prefix>/libexec/kwin-api-server/kwin-api-host.py
+--   <prefix>/lib/firefox/native-messaging-hosts/org.plasma_tweak.kwin_api.json
+--
+-- Firefox scans system-wide native messaging manifests in
+-- /usr/lib/mozilla/native-messaging-hosts and /usr/lib64/mozilla/
+-- native-messaging-hosts, so when the effective prefix is the real system
+-- prefix (/usr) the manifest is additionally installed into every existing
+-- directory of that pair — `sudo xmake install` alone is then enough for
+-- Firefox to find the host. For staged installs (`xmake install -o <dir>`)
+-- the manifest stays under the prefix; copy it to
+-- ~/.mozilla/native-messaging-hosts/ to use it without root (see
+-- native/README.md).
+-- ---------------------------------------------------------------------------
+target("kwin-api-native")
+    set_kind("headeronly")
+    on_install(function(target)
+        -- The effective install prefix: set_installdir() by default, overridden
+        -- by `xmake install -o <dir>` / --installdir / $DESTDIR. xmake resolves
+        -- a *relative* prefix against the project directory (regardless of the
+        -- CWD the command was run from); mirror that like the daemon target.
+        local prefix = target:installdir()
+        local abs_prefix = path.absolute(prefix, os.projectdir())
+        -- <prefix>/libexec/kwin-api-server/kwin-api-host.py (Firefox execs it)
+        local libexec = path.join(abs_prefix, "libexec", "kwin-api-server")
+        os.mkdir(libexec)
+        local host = path.join(libexec, "kwin-api-host.py")
+        os.cp(path.join(os.projectdir(), "native", "kwin-api-host.py"), host)
+        os.runv("chmod", {"755", host}) -- os.cp does not preserve modes
+        -- <prefix>/lib/firefox/native-messaging-hosts/<name>.json (rendered
+        -- from the template so the `path` always follows the effective prefix)
+        local template = io.readfile(path.join(os.projectdir(), "native",
+                                               "host-manifest.json"))
+        assert(template, "cannot read native/host-manifest.json")
+        local manifest = template:gsub("@HOST_PATH@", host)
+        local mdir = path.join(abs_prefix, "lib", "firefox", "native-messaging-hosts")
+        os.mkdir(mdir)
+        local manifest_file = path.join(mdir, "org.plasma_tweak.kwin_api.json")
+        io.writefile(manifest_file, manifest)
+        -- System-wide install: also drop the manifest where Firefox looks.
+        if abs_prefix == "/usr" then
+            for _, sysdir in ipairs({
+                "/usr/lib/mozilla/native-messaging-hosts",
+                "/usr/lib64/mozilla/native-messaging-hosts",
+            }) do
+                if os.isdir(sysdir) then
+                    os.cp(manifest_file,
+                          path.join(sysdir, "org.plasma_tweak.kwin_api.json"))
+                end
+            end
+        end
+    end)
+    on_uninstall(function(target)
+        local prefix = target:installdir()
+        local abs_prefix = path.absolute(prefix, os.projectdir())
+        os.tryrm(path.join(abs_prefix, "libexec", "kwin-api-server",
+                           "kwin-api-host.py"))
+        os.tryrm(path.join(abs_prefix, "lib", "firefox", "native-messaging-hosts",
+                           "org.plasma_tweak.kwin_api.json"))
+        if abs_prefix == "/usr" then
+            for _, sysdir in ipairs({
+                "/usr/lib/mozilla/native-messaging-hosts",
+                "/usr/lib64/mozilla/native-messaging-hosts",
+            }) do
+                os.tryrm(path.join(sysdir, "org.plasma_tweak.kwin_api.json"))
+            end
+        end
+    end)
