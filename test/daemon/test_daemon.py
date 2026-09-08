@@ -580,11 +580,11 @@ def t_cli_poll_fragmented_send():
 @test("cli poll: multi-byte UTF-8 payload is delivered byte-exact")
 def t_cli_poll_utf8():
     s, cid = new_client()
-    payload = '{"msg":"你好，世界"}'
+    payload = '{"msg":"café — naïve"}'
     send_frame(s, payload.encode())
     raw, msgs = wait_cli_raw(cid, 1)
     assert raw == "[" + payload + "]", f"UTF-8 not verbatim: {raw}"
-    assert msgs == [{"msg": "你好，世界"}]
+    assert msgs == [{"msg": "café — naïve"}]
     close_client(s, cid)
 
 
@@ -715,8 +715,8 @@ def t_push_multiple_ordered():
 @test("push: UTF-8 payload reaches the client byte-exact")
 def t_push_utf8():
     s, cid = new_client()
-    assert str(cli_push(cid, "你好")) == ""
-    assert recv_frame(s) == "你好".encode()
+    assert str(cli_push(cid, "café")) == ""
+    assert recv_frame(s) == "café".encode()
     close_client(s, cid)
 
 

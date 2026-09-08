@@ -12,7 +12,7 @@ namespace proto {
 namespace {
 
 // Global scratch buffer used to swallow oversized payloads: the daemon keeps
-// consuming the frame but stores nothing ("用一个全局缓冲区接废消息").
+// consuming the frame but stores nothing (one global buffer for the garbage).
 constexpr size_t kDiscardChunk = 4096;
 char g_discard[kDiscardChunk];
 
