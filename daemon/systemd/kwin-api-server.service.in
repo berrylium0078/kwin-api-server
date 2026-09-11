@@ -1,9 +1,9 @@
 [Unit]
 Description=KWin API Server - unix socket + D-Bus service bridging to KWin scripting
-# KWin must be running before the script can be loaded; graphical-session.target
-# is the earliest point where a desktop session is up (the daemon also retries
-# loadScript while KWin is starting).
-After=plasma-kwin_wayland.service
+# Start after the graphical session target, so the service waits for the
+# desktop session's startup ordering rather than depending on individual
+# Plasma components. KWin's activity list may still synchronize asynchronously.
+After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
